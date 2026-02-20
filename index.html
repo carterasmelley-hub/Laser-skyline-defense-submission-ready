@@ -421,13 +421,23 @@ applyHiDpi();
     }
 
     function unlockAudioIfNeeded() {
-      if (!audioUnlockNeeded) return;
-      audioUnlockNeeded = false;
+      const ctx = ensureAudioContext();
+      if (!ctx) {
+        audioUnlockNeeded = false;
+        return;
+      }
+      if (!audioUnlockNeeded && ctx.state === "running") return;
 
-      ensureAudioContext();
-
-      if (audioCtx && audioCtx.state === "suspended") {
-        audioCtx.resume().catch(() => {});
+      if (ctx.state !== "running") {
+        ctx.resume()
+          .then(() => {
+            audioUnlockNeeded = false;
+            updateAudioKeepAlive();
+          })
+          .catch(() => {
+            // Keep trying on the next real user gesture.
+            audioUnlockNeeded = true;
+          });
       }
 
       if (bgMusic && musicEnabled) {
@@ -436,20 +446,21 @@ applyHiDpi();
 
       // iOS: "ping" the context with a silent buffer in a gesture to fully unlock SFX.
       try {
-        if (audioCtx) {
-          const b = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
-          const s = audioCtx.createBufferSource();
-          s.buffer = b;
-          s.connect(audioCtx.destination);
-          s.start(0);
-        }
+        const b = ctx.createBuffer(1, 1, ctx.sampleRate);
+        const s = ctx.createBufferSource();
+        s.buffer = b;
+        s.connect(ctx.destination);
+        s.start(0);
       } catch (e) {}
+
+      // If still suspended after this gesture, keep retrying on next gesture.
+      if (ctx.state !== "running") audioUnlockNeeded = true;
       updateAudioKeepAlive();
     }
 
     
 ["pointerdown", "touchstart", "touchend", "mousedown", "click", "keydown"].forEach((ev) => {
-  const opts = ev === "keydown" ? { capture: true } : { passive: true, capture: true };
+  const opts = ev === "keydown" ? { capture: true } : { passive: false, capture: true };
   document.addEventListener(ev, unlockAudioIfNeeded, opts);
 });
 
