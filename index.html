@@ -369,6 +369,8 @@ applyHiDpi();
     let sfxCtx = null;
     let sfxMasterGain = null;
     let sfxBoomBuffer = null;
+    let sfxKeepAliveNode = null;
+    let sfxKeepAliveGain = null;
     let sfxUnlockNeeded = true;
     let sfxUnlocked = false;
     let sfxUnlockInFlight = false;
@@ -389,6 +391,7 @@ applyHiDpi();
     const fallbackSfxPool = [];
     let fallbackSfxIndex = 0;
     let fallbackBoomDataUri = null;
+    const DEBUG_AUDIO = /(?:\?|&)debugAudio=1(?:&|$)/.test(window.location.search || "");
 
     function generateFallbackBoomDataUri() {
       const sampleRate = 22050;
@@ -478,6 +481,8 @@ applyHiDpi();
           sfxMasterGain.gain.value = sfxEnabled ? 1.0 : 0.0;
           sfxMasterGain.connect(sfxCtx.destination);
           sfxBoomBuffer = null;
+          sfxKeepAliveNode = null;
+          sfxKeepAliveGain = null;
           sfxCtx.onstatechange = () => {
             if (!sfxCtx) return;
             if (sfxCtx.state === "running") {
@@ -487,6 +492,7 @@ applyHiDpi();
               sfxUnlocked = false;
               sfxUnlockNeeded = true;
             }
+            syncSfxKeepAlive();
           };
         } catch (e) {
           sfxCtx = null;
@@ -494,7 +500,46 @@ applyHiDpi();
         }
       }
       ensureSfxBoomBuffer();
+      syncSfxKeepAlive();
       return sfxCtx;
+    }
+
+    function stopSfxKeepAlive() {
+      if (sfxKeepAliveNode) {
+        try { sfxKeepAliveNode.stop(); } catch (e) {}
+        try { sfxKeepAliveNode.disconnect(); } catch (e) {}
+      }
+      if (sfxKeepAliveGain) {
+        try { sfxKeepAliveGain.disconnect(); } catch (e) {}
+      }
+      sfxKeepAliveNode = null;
+      sfxKeepAliveGain = null;
+    }
+
+    function syncSfxKeepAlive() {
+      if (!sfxCtx || !sfxMasterGain) {
+        stopSfxKeepAlive();
+        return;
+      }
+      const shouldRun = sfxEnabled && !musicEnabled && sfxCtx.state === "running";
+      if (!shouldRun) {
+        stopSfxKeepAlive();
+        return;
+      }
+      if (sfxKeepAliveNode && sfxKeepAliveGain) return;
+      try {
+        const node = sfxCtx.createConstantSource();
+        const gain = sfxCtx.createGain();
+        node.offset.value = 1.0;
+        gain.gain.value = 0.000001;
+        node.connect(gain);
+        gain.connect(sfxMasterGain);
+        node.start();
+        sfxKeepAliveNode = node;
+        sfxKeepAliveGain = gain;
+      } catch (e) {
+        stopSfxKeepAlive();
+      }
     }
 
     function ensureSfxBoomBuffer() {
@@ -578,6 +623,7 @@ applyHiDpi();
       sfxUnlockNeeded = !sfxUnlocked;
 
       applyMusicState();
+      syncSfxKeepAlive();
       sfxUnlockInFlight = false;
     }
 
@@ -636,6 +682,7 @@ applyHiDpi();
           bgMusic.currentTime = 0;
         } catch (e) {}
       }
+      syncSfxKeepAlive();
     }
 
     function applySfxState() {
@@ -645,6 +692,7 @@ applyHiDpi();
         sfxMasterGain.gain.cancelScheduledValues(now);
         sfxMasterGain.gain.setTargetAtTime(sfxEnabled ? 1.0 : 0.0, now, 0.01);
       } catch (e) {}
+      syncSfxKeepAlive();
     }
 
     function initAudio() {
@@ -671,6 +719,7 @@ applyHiDpi();
         unlockAudioIfNeeded();
       }
       applyMusicState();
+      syncSfxKeepAlive();
     }
 
     function setSfx(on) {
@@ -681,6 +730,7 @@ applyHiDpi();
         requestAudioUnlock();
         unlockAudioIfNeeded();
       }
+      syncSfxKeepAlive();
     }
 
     // M key and pause "Audio" button toggle both at once.
@@ -3686,6 +3736,33 @@ function drawHUD() {
         const label = reserveActiveTimer > 0 ? `ACTIVE ${reserveActiveTimer.toFixed(1)}s` : (reserveAvailableThisWave ? "READY" : "");
         ctx.fillText(`RESERVE (Q): ${label}`, W - 20, 44);
       }
+
+      if (DEBUG_AUDIO) {
+        const ctxState = sfxCtx ? sfxCtx.state : "none";
+        const lines = [
+          `DBG game=${gameState} fire=${firing} canFire=${canFire()} lock=${energyLocked}`,
+          `DBG m=${musicEnabled} sfx=${sfxEnabled} unlock=${sfxUnlocked}/${sfxUnlockNeeded} inFlight=${sfxUnlockInFlight}`,
+          `DBG ctx=${ctxState} activeSfx=${activeSfx} keepAlive=${!!sfxKeepAliveNode} pointer=${pointerIsDown}`,
+        ];
+        const boxW = 520;
+        const boxH = 72;
+        const bx2 = 10;
+        const by2 = H - boxH - 8;
+        ctx.save();
+        ctx.globalAlpha = 0.86;
+        ctx.fillStyle = "rgba(0,0,0,0.75)";
+        ctx.fillRect(bx2, by2, boxW, boxH);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = "rgba(0,255,0,0.6)";
+        ctx.strokeRect(bx2, by2, boxW, boxH);
+        ctx.fillStyle = "#0f0";
+        ctx.textAlign = "left";
+        ctx.font = "12px monospace";
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], bx2 + 8, by2 + 18 + i * 18);
+        }
+        ctx.restore();
+      }
     }
 
     function drawGameOver() {
@@ -5476,6 +5553,14 @@ function canvasPos(evt) {
 
     canvas.addEventListener("touchend", (e) => {
       e.preventDefault();
+      if (e.touches && e.touches.length > 0) {
+        pointerIsDown = true;
+        const t = e.touches[0];
+        const p = canvasPosFromClient(t.clientX, t.clientY);
+        mouse.x = p.x; mouse.y = p.y;
+        if (gameState === "playing" && !mobileControlsEnabled) firing = true;
+        return;
+      }
       pointerIsDown = false;
 
       // End help drag
@@ -5498,6 +5583,22 @@ function canvasPos(evt) {
 
       if (gameState === "playing") {
         // On mobile, lifting the aim finger should not cancel firing if FIRE is held.
+        if (!mobileControlsEnabled || !mobileFireHeld) firing = false;
+      }
+    }, { passive: false });
+
+    canvas.addEventListener("touchcancel", (e) => {
+      e.preventDefault();
+      if (e.touches && e.touches.length > 0) {
+        pointerIsDown = true;
+        const t = e.touches[0];
+        const p = canvasPosFromClient(t.clientX, t.clientY);
+        mouse.x = p.x; mouse.y = p.y;
+        if (gameState === "playing" && !mobileControlsEnabled) firing = true;
+        return;
+      }
+      pointerIsDown = false;
+      if (gameState === "playing") {
         if (!mobileControlsEnabled || !mobileFireHeld) firing = false;
       }
     }, { passive: false });
