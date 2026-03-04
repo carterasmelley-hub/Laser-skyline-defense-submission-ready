@@ -372,12 +372,18 @@ applyHiDpi();
     let sfxUnlocked = false;
     let sfxUnlockInFlight = false;
     let fallbackSfxReady = false;
+    const IS_COARSE_POINTER = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+    const IS_MOBILE_AUDIO = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || "") || IS_COARSE_POINTER;
 
     // Simple load guard: prevent too many concurrent booms on mobile.
     let lastSfxAt = 0;
+    let lastFallbackSfxAt = 0;
+    let lastUnlockAttemptMs = 0;
     let activeSfx = 0;
-    const MAX_ACTIVE_SFX = 18;
-    const MIN_SFX_GAP_MS = 28;
+    const MAX_ACTIVE_SFX = IS_MOBILE_AUDIO ? 8 : 18;
+    const MIN_SFX_GAP_MS = IS_MOBILE_AUDIO ? 55 : 28;
+    const FALLBACK_MIN_GAP_MS = IS_MOBILE_AUDIO ? 90 : 45;
+    const MIN_UNLOCK_RETRY_MS = 250;
     const FALLBACK_SFX_POOL_SIZE = 4;
     const fallbackSfxPool = [];
     let fallbackSfxIndex = 0;
@@ -535,6 +541,10 @@ applyHiDpi();
 
     function unlockAudioIfNeeded() {
       if (!sfxUnlockNeeded && sfxUnlocked) return;
+      if (sfxUnlockInFlight) return;
+      const t = performance.now();
+      if (t - lastUnlockAttemptMs < MIN_UNLOCK_RETRY_MS) return;
+      lastUnlockAttemptMs = t;
       unlockAudioNow();
     }
 
@@ -646,9 +656,61 @@ applyHiDpi();
       lastSfxAt = nowMs;
 
       const ctx = ensureSfxContext();
-      const canUseWebAudio = !!ctx && !!sfxMasterGain && sfxUnlocked && ctx.state === "running";
+      const hasWebAudio = !!ctx && !!sfxMasterGain;
 
-      if (!canUseWebAudio) {
+      // Prefer WebAudio whenever available; HTML audio fallback can be delayed on iOS.
+      if (hasWebAudio) {
+        if (ctx.state !== "running") {
+          try {
+            if (!sfxUnlockInFlight) ctx.resume();
+          } catch (e) {}
+          requestAudioUnlock();
+          unlockAudioIfNeeded();
+          return; // Drop stale SFX instead of playing late/out-of-sync.
+        }
+
+        if (activeSfx >= MAX_ACTIVE_SFX) return;
+
+        try {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const now = ctx.currentTime;
+          const dur = IS_MOBILE_AUDIO ? 0.18 : 0.25;
+          const endFreq = IS_MOBILE_AUDIO ? 70 : 60;
+          activeSfx++;
+
+          // Original style: descending triangle boom.
+          osc.type = "triangle";
+          osc.frequency.setValueAtTime(200, now);
+          osc.frequency.exponentialRampToValueAtTime(endFreq, now + dur);
+          gain.gain.setValueAtTime(0.92, now);
+          gain.gain.exponentialRampToValueAtTime(0.015, now + dur);
+
+          osc.connect(gain);
+          gain.connect(sfxMasterGain);
+          osc.start(now);
+          osc.stop(now + dur);
+
+          osc.onended = () => {
+            if (activeSfx > 0) activeSfx--;
+          };
+          sfxUnlocked = true;
+          sfxUnlockNeeded = false;
+          return;
+        } catch (e) {
+          if (activeSfx > 0) activeSfx--;
+          sfxUnlocked = false;
+          sfxUnlockNeeded = true;
+          requestAudioUnlock();
+          unlockAudioIfNeeded();
+          return;
+        }
+      }
+
+      // Fallback path only for browsers without WebAudio support.
+      if (nowMs - lastFallbackSfxAt < FALLBACK_MIN_GAP_MS) return;
+      lastFallbackSfxAt = nowMs;
+      {
         ensureFallbackSfx();
         if (fallbackSfxPool.length) {
           for (let i = 0; i < fallbackSfxPool.length; i++) {
@@ -678,35 +740,6 @@ applyHiDpi();
         requestAudioUnlock();
         unlockAudioIfNeeded();
         return;
-      }
-
-      if (activeSfx >= MAX_ACTIVE_SFX) return;
-
-      try {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        const now = ctx.currentTime;
-        activeSfx++;
-
-        // Original style: descending triangle boom.
-        osc.type = "triangle";
-        osc.frequency.setValueAtTime(200, now);
-        osc.frequency.exponentialRampToValueAtTime(60, now + 0.25);
-        gain.gain.setValueAtTime(0.95, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
-
-        osc.connect(gain);
-        gain.connect(sfxMasterGain);
-        osc.start(now);
-        osc.stop(now + 0.25);
-
-        osc.onended = () => {
-          if (activeSfx > 0) activeSfx--;
-        };
-      } catch (e) {
-        if (activeSfx > 0) activeSfx--;
-        sfxUnlocked = false;
-        sfxUnlockNeeded = true;
       }
     }
 
