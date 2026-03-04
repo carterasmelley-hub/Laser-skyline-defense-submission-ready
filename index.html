@@ -420,6 +420,15 @@ applyHiDpi();
       audioUnlockNeeded = true;
     }
 
+    function resumeAudioContextIfNeeded() {
+      const ctx = ensureAudioContext();
+      if (!ctx) return Promise.resolve(false);
+      if (ctx.state === "running") return Promise.resolve(true);
+      return ctx.resume()
+        .then(() => ctx.state === "running")
+        .catch(() => false);
+    }
+
     function unlockAudioIfNeeded() {
       const ctx = ensureAudioContext();
       if (!ctx) {
@@ -429,15 +438,10 @@ applyHiDpi();
       if (!audioUnlockNeeded && ctx.state === "running") return;
 
       if (ctx.state !== "running") {
-        ctx.resume()
-          .then(() => {
-            audioUnlockNeeded = false;
-            updateAudioKeepAlive();
-          })
-          .catch(() => {
-            // Keep trying on the next real user gesture.
-            audioUnlockNeeded = true;
-          });
+        resumeAudioContextIfNeeded().then((ok) => {
+          audioUnlockNeeded = !ok;
+          updateAudioKeepAlive();
+        });
       }
 
       if (bgMusic && musicEnabled) {
@@ -477,7 +481,19 @@ applyHiDpi();
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return null;
       if (!audioCtx || audioCtx.state === "closed") {
-        try { audioCtx = new AC(); stopAudioKeepAlive(); } catch (e) { audioCtx = null; }
+        try {
+          audioCtx = new AC();
+          stopAudioKeepAlive();
+          audioCtx.onstatechange = () => {
+            if (!audioCtx) return;
+            if (audioCtx.state !== "running") {
+              audioUnlockNeeded = true;
+            } else {
+              audioUnlockNeeded = false;
+              updateAudioKeepAlive();
+            }
+          };
+        } catch (e) { audioCtx = null; }
       }
       return audioCtx;
     }
@@ -502,6 +518,7 @@ applyHiDpi();
       if (!audioReady) audioReady = true;
       ensureAudioContext();
       applyMusicState();
+      requestAudioUnlock();
       unlockAudioIfNeeded();
       updateAudioKeepAlive();
     }
@@ -520,8 +537,12 @@ applyHiDpi();
       // browsers will block SFX resume unless a context exists).
       if (musicEnabled || sfxEnabled) ensureAudioContext();
       applyMusicState();
-      if (audioCtx && (musicEnabled || sfxEnabled) && audioCtx.state === "suspended") {
+      if (audioCtx && (musicEnabled || sfxEnabled) && audioCtx.state !== "running") {
         audioCtx.resume().catch(() => {});
+      }
+      if (musicEnabled) {
+        requestAudioUnlock();
+        unlockAudioIfNeeded();
       }
       updateAudioKeepAlive();
     }
@@ -529,8 +550,12 @@ applyHiDpi();
     function setSfx(on) {
       sfxEnabled = !!on;
       if (sfxEnabled) ensureAudioContext();
-      if (audioCtx && sfxEnabled && audioCtx.state === "suspended") {
+      if (audioCtx && sfxEnabled && audioCtx.state !== "running") {
         audioCtx.resume().catch(() => {});
+      }
+      if (sfxEnabled) {
+        requestAudioUnlock();
+        unlockAudioIfNeeded();
       }
       updateAudioKeepAlive();
     }
@@ -546,14 +571,11 @@ applyHiDpi();
       if (!sfxEnabled) return;
       const ctx = ensureAudioContext();
       if (!ctx) return;
-      if (ctx.state === "suspended") { ctx.resume().catch(() => {}); }
+      if (ctx.state !== "running") { ctx.resume().catch(() => {}); }
       unlockAudioIfNeeded();
       // If the context is suspended (common after tab/app backgrounding), let the
       // next user gesture resume it via setMusic/setSfx/initAudio.
-      if (ctx.state !== "running") {
-        ctx.resume().then(() => { if (ctx.state === "running") boom(); }).catch(() => {});
-        return;
-      }
+      if (ctx.state !== "running") return;
       try {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
