@@ -368,6 +368,7 @@ applyHiDpi();
     // SFX uses WebAudio (fast, low-latency); music uses <audio>.
     let sfxCtx = null;
     let sfxMasterGain = null;
+    let sfxBoomBuffer = null;
     let sfxUnlockNeeded = true;
     let sfxUnlocked = false;
     let sfxUnlockInFlight = false;
@@ -383,7 +384,7 @@ applyHiDpi();
     const MAX_ACTIVE_SFX = IS_MOBILE_AUDIO ? 8 : 18;
     const MIN_SFX_GAP_MS = IS_MOBILE_AUDIO ? 55 : 28;
     const FALLBACK_MIN_GAP_MS = IS_MOBILE_AUDIO ? 90 : 45;
-    const MIN_UNLOCK_RETRY_MS = 250;
+    const MIN_UNLOCK_RETRY_MS = 90;
     const FALLBACK_SFX_POOL_SIZE = 4;
     const fallbackSfxPool = [];
     let fallbackSfxIndex = 0;
@@ -476,6 +477,7 @@ applyHiDpi();
           sfxMasterGain = sfxCtx.createGain();
           sfxMasterGain.gain.value = sfxEnabled ? 1.0 : 0.0;
           sfxMasterGain.connect(sfxCtx.destination);
+          sfxBoomBuffer = null;
           sfxCtx.onstatechange = () => {
             if (!sfxCtx) return;
             if (sfxCtx.state === "running") {
@@ -491,18 +493,57 @@ applyHiDpi();
           sfxMasterGain = null;
         }
       }
+      ensureSfxBoomBuffer();
       return sfxCtx;
+    }
+
+    function ensureSfxBoomBuffer() {
+      if (!sfxCtx || sfxBoomBuffer) return;
+      try {
+        const sampleRate = sfxCtx.sampleRate || 44100;
+        const duration = IS_MOBILE_AUDIO ? 0.17 : 0.23;
+        const len = Math.max(1, Math.floor(sampleRate * duration));
+        const buf = sfxCtx.createBuffer(1, len, sampleRate);
+        const ch = buf.getChannelData(0);
+        const startFreq = 210;
+        const endFreq = IS_MOBILE_AUDIO ? 78 : 64;
+        for (let i = 0; i < len; i++) {
+          const t = i / sampleRate;
+          const k = Math.min(1, t / duration);
+          const freq = startFreq * Math.pow(endFreq / startFreq, k);
+          const tri = (2 / Math.PI) * Math.asin(Math.sin(2 * Math.PI * freq * t));
+          const env = Math.exp(-18 * t);
+          ch[i] = tri * env * 0.9;
+        }
+        sfxBoomBuffer = buf;
+      } catch (e) {
+        sfxBoomBuffer = null;
+      }
     }
 
     function requestAudioUnlock() {
       sfxUnlockNeeded = true;
     }
 
+    function kickAudioFromGesture() {
+      const ctx = ensureSfxContext();
+      if (ctx && ctx.state !== "running") {
+        try {
+          const p = ctx.resume();
+          if (p && typeof p.then === "function") {
+            p.then(() => {
+              sfxUnlocked = (ctx.state === "running");
+              sfxUnlockNeeded = !sfxUnlocked;
+            }).catch(() => {});
+          }
+        } catch (e) {}
+      }
+    }
+
     async function unlockAudioNow() {
       if (sfxUnlockInFlight) return;
       sfxUnlockInFlight = true;
 
-      ensureFallbackSfx();
       const ctx = ensureSfxContext();
       let webAudioOk = false;
 
@@ -524,13 +565,14 @@ applyHiDpi();
       }
 
       let fallbackOk = false;
-      if (fallbackSfxPool.length) {
-        for (let i = 0; i < fallbackSfxPool.length; i++) {
-          const ok = await primeAudioElement(fallbackSfxPool[i]);
-          if (ok) fallbackOk = true;
+      if (!webAudioOk) {
+        ensureFallbackSfx();
+        if (fallbackSfxPool.length) {
+          const ok = await primeAudioElement(fallbackSfxPool[0]);
+          fallbackOk = !!ok;
         }
       }
-      fallbackSfxReady = fallbackSfxReady || fallbackOk || fallbackSfxPool.length > 0;
+      fallbackSfxReady = fallbackSfxReady || fallbackOk;
 
       sfxUnlocked = webAudioOk || fallbackOk;
       sfxUnlockNeeded = !sfxUnlocked;
@@ -540,6 +582,7 @@ applyHiDpi();
     }
 
     function unlockAudioIfNeeded() {
+      kickAudioFromGesture();
       if (!sfxUnlockNeeded && sfxUnlocked) return;
       if (sfxUnlockInFlight) return;
       const t = performance.now();
@@ -632,7 +675,6 @@ applyHiDpi();
 
     function setSfx(on) {
       sfxEnabled = !!on;
-      ensureFallbackSfx();
       ensureSfxContext();
       applySfxState();
       if (sfxEnabled) {
@@ -672,26 +714,26 @@ applyHiDpi();
         if (activeSfx >= MAX_ACTIVE_SFX) return;
 
         try {
-          const osc = ctx.createOscillator();
+          ensureSfxBoomBuffer();
+          if (!sfxBoomBuffer) return;
+
+          const src = ctx.createBufferSource();
           const gain = ctx.createGain();
           const now = ctx.currentTime;
           const dur = IS_MOBILE_AUDIO ? 0.18 : 0.25;
-          const endFreq = IS_MOBILE_AUDIO ? 70 : 60;
           activeSfx++;
 
-          // Original style: descending triangle boom.
-          osc.type = "triangle";
-          osc.frequency.setValueAtTime(200, now);
-          osc.frequency.exponentialRampToValueAtTime(endFreq, now + dur);
+          src.buffer = sfxBoomBuffer;
+          src.playbackRate.setValueAtTime(0.94 + Math.random() * 0.14, now);
           gain.gain.setValueAtTime(0.92, now);
           gain.gain.exponentialRampToValueAtTime(0.015, now + dur);
 
-          osc.connect(gain);
+          src.connect(gain);
           gain.connect(sfxMasterGain);
-          osc.start(now);
-          osc.stop(now + dur);
+          src.start(now);
+          src.stop(now + dur);
 
-          osc.onended = () => {
+          src.onended = () => {
             if (activeSfx > 0) activeSfx--;
           };
           sfxUnlocked = true;
