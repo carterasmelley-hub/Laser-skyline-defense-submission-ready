@@ -447,8 +447,10 @@ applyHiDpi();
       const prevMuted = !!el.muted;
       const prevVol = el.volume;
       try {
-        el.muted = true;
-        el.volume = 0;
+        // iOS may allow muted autoplay without actually unlocking audible playback.
+        // Prime at near-zero volume instead of muted to unlock reliably.
+        el.muted = false;
+        el.volume = 0.001;
         await el.play();
         try { el.pause(); el.currentTime = 0; } catch (e) {}
         return true;
@@ -495,13 +497,6 @@ applyHiDpi();
       sfxUnlockInFlight = true;
 
       ensureFallbackSfx();
-      let fallbackOk = false;
-      if (fallbackSfxPool.length) {
-        const p = await primeAudioElement(fallbackSfxPool[0]);
-        fallbackOk = !!p;
-      }
-      fallbackSfxReady = fallbackSfxReady || fallbackOk || fallbackSfxPool.length > 0;
-
       const ctx = ensureSfxContext();
       let webAudioOk = false;
 
@@ -521,6 +516,15 @@ applyHiDpi();
           webAudioOk = (ctx.state === "running");
         } catch (e) {}
       }
+
+      let fallbackOk = false;
+      if (fallbackSfxPool.length) {
+        for (let i = 0; i < fallbackSfxPool.length; i++) {
+          const ok = await primeAudioElement(fallbackSfxPool[i]);
+          if (ok) fallbackOk = true;
+        }
+      }
+      fallbackSfxReady = fallbackSfxReady || fallbackOk || fallbackSfxPool.length > 0;
 
       sfxUnlocked = webAudioOk || fallbackOk;
       sfxUnlockNeeded = !sfxUnlocked;
@@ -647,24 +651,29 @@ applyHiDpi();
       if (!canUseWebAudio) {
         ensureFallbackSfx();
         if (fallbackSfxPool.length) {
-          try {
-            const a = fallbackSfxPool[fallbackSfxIndex];
-            fallbackSfxIndex = (fallbackSfxIndex + 1) % fallbackSfxPool.length;
-            a.pause();
-            a.currentTime = 0;
-            a.playbackRate = 0.96 + Math.random() * 0.08;
-            const p = a.play();
-            if (p && typeof p.catch === "function") {
-              p.then(() => {
+          for (let i = 0; i < fallbackSfxPool.length; i++) {
+            try {
+              const idx = (fallbackSfxIndex + i) % fallbackSfxPool.length;
+              const a = fallbackSfxPool[idx];
+              a.pause();
+              a.currentTime = 0;
+              a.playbackRate = 0.96 + Math.random() * 0.08;
+              const p = a.play();
+              fallbackSfxIndex = (idx + 1) % fallbackSfxPool.length;
+              if (p && typeof p.catch === "function") {
+                p.then(() => {
+                  sfxUnlocked = true;
+                  sfxUnlockNeeded = false;
+                }).catch(() => { requestAudioUnlock(); });
+              } else {
                 sfxUnlocked = true;
                 sfxUnlockNeeded = false;
-              }).catch(() => { requestAudioUnlock(); });
-            } else {
-              sfxUnlocked = true;
-              sfxUnlockNeeded = false;
+              }
+              return;
+            } catch (e) {
+              // try next fallback voice
             }
-            return;
-          } catch (e) {}
+          }
         }
         requestAudioUnlock();
         unlockAudioIfNeeded();
