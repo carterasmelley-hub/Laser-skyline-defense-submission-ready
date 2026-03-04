@@ -371,12 +371,93 @@ applyHiDpi();
     let sfxUnlockNeeded = true;
     let sfxUnlocked = false;
     let sfxUnlockInFlight = false;
+    let fallbackSfxReady = false;
 
     // Simple load guard: prevent too many concurrent booms on mobile.
     let lastSfxAt = 0;
     let activeSfx = 0;
     const MAX_ACTIVE_SFX = 18;
     const MIN_SFX_GAP_MS = 28;
+    const FALLBACK_SFX_POOL_SIZE = 4;
+    const fallbackSfxPool = [];
+    let fallbackSfxIndex = 0;
+    let fallbackBoomDataUri = null;
+
+    function generateFallbackBoomDataUri() {
+      const sampleRate = 22050;
+      const duration = 0.25;
+      const samples = Math.max(1, Math.floor(sampleRate * duration));
+      const bytesPerSample = 2;
+      const dataSize = samples * bytesPerSample;
+      const buffer = new ArrayBuffer(44 + dataSize);
+      const view = new DataView(buffer);
+
+      const writeStr = (offset, str) => {
+        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+      };
+      writeStr(0, "RIFF");
+      view.setUint32(4, 36 + dataSize, true);
+      writeStr(8, "WAVE");
+      writeStr(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * bytesPerSample, true);
+      view.setUint16(32, bytesPerSample, true);
+      view.setUint16(34, 16, true);
+      writeStr(36, "data");
+      view.setUint32(40, dataSize, true);
+
+      let o = 44;
+      for (let i = 0; i < samples; i++) {
+        const t = i / sampleRate;
+        const env = Math.exp(-18 * t);
+        const freq = 200 * Math.pow(60 / 200, Math.min(1, t / duration));
+        const tri = (2 / Math.PI) * Math.asin(Math.sin(2 * Math.PI * freq * t)); // triangle
+        let s = tri * env * 0.95;
+        if (s > 1) s = 1;
+        if (s < -1) s = -1;
+        view.setInt16(o, (s * 32767) | 0, true);
+        o += 2;
+      }
+
+      let bin = "";
+      const bytes = new Uint8Array(buffer);
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return "data:audio/wav;base64," + btoa(bin);
+    }
+
+    function ensureFallbackSfx() {
+      if (fallbackSfxPool.length) return;
+      if (!fallbackBoomDataUri) fallbackBoomDataUri = generateFallbackBoomDataUri();
+      for (let i = 0; i < FALLBACK_SFX_POOL_SIZE; i++) {
+        const a = new Audio(fallbackBoomDataUri);
+        a.preload = "auto";
+        a.volume = 1.0;
+        a.playsInline = true;
+        a.setAttribute("webkit-playsinline", "");
+        fallbackSfxPool.push(a);
+      }
+      fallbackSfxReady = true;
+    }
+
+    async function primeAudioElement(el) {
+      if (!el) return false;
+      const prevMuted = !!el.muted;
+      const prevVol = el.volume;
+      try {
+        el.muted = true;
+        el.volume = 0;
+        await el.play();
+        try { el.pause(); el.currentTime = 0; } catch (e) {}
+        return true;
+      } catch (e) {
+        return false;
+      } finally {
+        try { el.muted = prevMuted; el.volume = prevVol; } catch (e) {}
+      }
+    }
 
     function ensureSfxContext() {
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -413,33 +494,36 @@ applyHiDpi();
       if (sfxUnlockInFlight) return;
       sfxUnlockInFlight = true;
 
+      ensureFallbackSfx();
+      let fallbackOk = false;
+      if (fallbackSfxPool.length) {
+        const p = await primeAudioElement(fallbackSfxPool[0]);
+        fallbackOk = !!p;
+      }
+      fallbackSfxReady = fallbackSfxReady || fallbackOk || fallbackSfxPool.length > 0;
+
       const ctx = ensureSfxContext();
-      if (!ctx) {
-        sfxUnlocked = false;
-        sfxUnlockNeeded = true;
-        sfxUnlockInFlight = false;
-        return;
+      let webAudioOk = false;
+
+      if (ctx) {
+        try {
+          await ctx.resume();
+
+          // Warm up with a silent click so gesture unlock is consumed now.
+          const b = ctx.createBuffer(1, 1, ctx.sampleRate);
+          const s = ctx.createBufferSource();
+          const g = ctx.createGain();
+          g.gain.value = 0;
+          s.buffer = b;
+          s.connect(g);
+          g.connect(ctx.destination);
+          s.start(0);
+          webAudioOk = (ctx.state === "running");
+        } catch (e) {}
       }
 
-      try {
-        await ctx.resume();
-
-        // Warm up with a silent click so gesture unlock is consumed now.
-        const b = ctx.createBuffer(1, 1, ctx.sampleRate);
-        const s = ctx.createBufferSource();
-        const g = ctx.createGain();
-        g.gain.value = 0;
-        s.buffer = b;
-        s.connect(g);
-        g.connect(ctx.destination);
-        s.start(0);
-
-        sfxUnlocked = (ctx.state === "running");
-        sfxUnlockNeeded = !sfxUnlocked;
-      } catch (e) {
-        sfxUnlocked = false;
-        sfxUnlockNeeded = true;
-      }
+      sfxUnlocked = webAudioOk || fallbackOk;
+      sfxUnlockNeeded = !sfxUnlocked;
 
       applyMusicState();
       sfxUnlockInFlight = false;
@@ -486,8 +570,7 @@ applyHiDpi();
         const p = bgMusic.play();
         if (p && typeof p.catch === "function") {
           p.catch(() => {
-            sfxUnlocked = false;
-            sfxUnlockNeeded = true;
+            requestAudioUnlock();
           });
         }
       } else {
@@ -535,6 +618,7 @@ applyHiDpi();
 
     function setSfx(on) {
       sfxEnabled = !!on;
+      ensureFallbackSfx();
       ensureSfxContext();
       applySfxState();
       if (sfxEnabled) {
@@ -558,9 +642,30 @@ applyHiDpi();
       lastSfxAt = nowMs;
 
       const ctx = ensureSfxContext();
-      if (!ctx || !sfxMasterGain) return;
+      const canUseWebAudio = !!ctx && !!sfxMasterGain && sfxUnlocked && ctx.state === "running";
 
-      if (!sfxUnlocked || ctx.state !== "running") {
+      if (!canUseWebAudio) {
+        ensureFallbackSfx();
+        if (fallbackSfxPool.length) {
+          try {
+            const a = fallbackSfxPool[fallbackSfxIndex];
+            fallbackSfxIndex = (fallbackSfxIndex + 1) % fallbackSfxPool.length;
+            a.pause();
+            a.currentTime = 0;
+            a.playbackRate = 0.96 + Math.random() * 0.08;
+            const p = a.play();
+            if (p && typeof p.catch === "function") {
+              p.then(() => {
+                sfxUnlocked = true;
+                sfxUnlockNeeded = false;
+              }).catch(() => { requestAudioUnlock(); });
+            } else {
+              sfxUnlocked = true;
+              sfxUnlockNeeded = false;
+            }
+            return;
+          } catch (e) {}
+        }
         requestAudioUnlock();
         unlockAudioIfNeeded();
         return;
