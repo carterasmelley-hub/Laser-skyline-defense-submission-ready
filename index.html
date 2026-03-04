@@ -370,6 +370,63 @@ applyHiDpi();
     // oscillator keeps the context running without audible output.
     let keepAliveNode = null;
     let keepAliveGain = null;
+    let sfxMasterGain = null;
+    let sfxBoomBuffer = null;
+    let audioWatchdog = null;
+
+    function buildBoomBuffer(ctx) {
+      const dur = 0.26;
+      const len = Math.max(1, Math.floor(ctx.sampleRate * dur));
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const ch = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) {
+        const t = i / ctx.sampleRate;
+        const env = Math.exp(-t * 18);
+        const tone = Math.sin(2 * Math.PI * (180 - 520 * t) * t) * 0.42;
+        const noise = (Math.random() * 2 - 1) * 0.24;
+        ch[i] = (tone + noise) * env;
+      }
+      return buf;
+    }
+
+    function ensureAudioWatchdog() {
+      if (audioWatchdog) return;
+      audioWatchdog = setInterval(() => {
+        const ctx = ensureAudioContext();
+        if (!ctx) return;
+        if (!musicEnabled && !sfxEnabled) return;
+        if (ctx.state !== "running") {
+          ctx.resume().catch(() => { audioUnlockNeeded = true; });
+        }
+      }, 1200);
+    }
+
+    function applySfxState() {
+      if (!audioCtx || !sfxMasterGain) return;
+      try {
+        const now = audioCtx.currentTime;
+        sfxMasterGain.gain.cancelScheduledValues(now);
+        sfxMasterGain.gain.setTargetAtTime(sfxEnabled ? 1.0 : 0.0, now, 0.01);
+      } catch (e) {}
+    }
+
+    function initSfxEngine(ctx) {
+      if (!ctx) return;
+      try {
+        if (!sfxMasterGain) {
+          sfxMasterGain = ctx.createGain();
+          sfxMasterGain.gain.value = sfxEnabled ? 1.0 : 0.0;
+          sfxMasterGain.connect(ctx.destination);
+        }
+        if (!sfxBoomBuffer) {
+          sfxBoomBuffer = buildBoomBuffer(ctx);
+        }
+        applySfxState();
+      } catch (e) {
+        sfxMasterGain = null;
+        sfxBoomBuffer = null;
+      }
+    }
 
     function stopAudioKeepAlive() {
       if (keepAliveNode) {
@@ -389,8 +446,8 @@ applyHiDpi();
       if (keepAliveNode) return;
       try {
         keepAliveGain = ctx.createGain();
-        // Epsilon gain: inaudible but prevents iOS from suspending the context.
-        keepAliveGain.gain.value = 0.000001;
+        // Tiny gain: effectively inaudible but prevents iOS from suspending audio.
+        keepAliveGain.gain.value = 0.0001;
         keepAliveGain.connect(ctx.destination);
 
         keepAliveNode = ctx.createOscillator();
@@ -408,7 +465,7 @@ applyHiDpi();
       if (!ctx) return;
       // Only needed when music is OFF but SFX is ON.
       if (!musicEnabled && sfxEnabled) {
-        if (ctx.state === "suspended") ctx.resume().catch(() => {});
+        if (ctx.state !== "running") ctx.resume().catch(() => {});
         startAudioKeepAlive();
       } else {
         stopAudioKeepAlive();
@@ -435,6 +492,7 @@ applyHiDpi();
         audioUnlockNeeded = false;
         return;
       }
+      initSfxEngine(ctx);
       if (!audioUnlockNeeded && ctx.state === "running") return;
 
       if (ctx.state !== "running") {
@@ -490,11 +548,15 @@ applyHiDpi();
               audioUnlockNeeded = true;
             } else {
               audioUnlockNeeded = false;
+              initSfxEngine(audioCtx);
               updateAudioKeepAlive();
             }
           };
+          initSfxEngine(audioCtx);
+          ensureAudioWatchdog();
         } catch (e) { audioCtx = null; }
       }
+      if (audioCtx && !sfxMasterGain) initSfxEngine(audioCtx);
       return audioCtx;
     }
 
@@ -506,8 +568,9 @@ applyHiDpi();
 
     function applyMusicState() {
       if (!bgMusic) return;
+      const keepMusicSessionForSfx = !musicEnabled && sfxEnabled;
       bgMusic.volume = musicEnabled ? 0.7 : 0.0;
-      if (musicEnabled) {
+      if (musicEnabled || keepMusicSessionForSfx) {
         bgMusic.play().catch(() => {});
       } else {
         try { bgMusic.pause(); } catch (e) {}
@@ -553,6 +616,8 @@ applyHiDpi();
       if (audioCtx && sfxEnabled && audioCtx.state !== "running") {
         audioCtx.resume().catch(() => {});
       }
+      applySfxState();
+      applyMusicState();
       if (sfxEnabled) {
         requestAudioUnlock();
         unlockAudioIfNeeded();
@@ -577,18 +642,13 @@ applyHiDpi();
       // next user gesture resume it via setMusic/setSfx/initAudio.
       if (ctx.state !== "running") return;
       try {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        const now = ctx.currentTime;
-        osc.type = "triangle";
-        osc.frequency.setValueAtTime(200, now);
-        osc.frequency.exponentialRampToValueAtTime(60, now + 0.25);
-        gain.gain.setValueAtTime(1, now);
-        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(now);
-        osc.stop(now + 0.25);
+        initSfxEngine(ctx);
+        const src = ctx.createBufferSource();
+        if (!sfxBoomBuffer) sfxBoomBuffer = buildBoomBuffer(ctx);
+        src.buffer = sfxBoomBuffer;
+        src.playbackRate.value = 0.96 + Math.random() * 0.1;
+        src.connect(sfxMasterGain || ctx.destination);
+        src.start();
       } catch (e) {
         // If the context was interrupted/closed mid-frame, silently skip.
       }
