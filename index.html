@@ -365,123 +365,88 @@ applyHiDpi();
     let sfxEnabled = true;
     let audioReady = false;
 
-    let audioUnlockNeeded = true;
-    let audioUnlocked = false;
-    let unlockInFlight = false;
+    // SFX uses WebAudio (fast, low-latency); music uses <audio>.
+    let sfxCtx = null;
+    let sfxMasterGain = null;
+    let sfxUnlockNeeded = true;
+    let sfxUnlocked = false;
+    let sfxUnlockInFlight = false;
 
-    const SFX_POOL_SIZE = 12;
-    const sfxPool = [];
-    let sfxPoolIndex = 0;
-    let sfxBoomDataUri = null;
+    // Simple load guard: prevent too many concurrent booms on mobile.
+    let lastSfxAt = 0;
+    let activeSfx = 0;
+    const MAX_ACTIVE_SFX = 18;
+    const MIN_SFX_GAP_MS = 28;
 
-    function generateBoomDataUri() {
-      const sampleRate = 22050;
-      const duration = 0.24;
-      const samples = Math.max(1, Math.floor(sampleRate * duration));
-      const bytesPerSample = 2;
-      const dataSize = samples * bytesPerSample;
-      const buffer = new ArrayBuffer(44 + dataSize);
-      const view = new DataView(buffer);
-
-      const writeStr = (offset, str) => {
-        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-      };
-
-      writeStr(0, "RIFF");
-      view.setUint32(4, 36 + dataSize, true);
-      writeStr(8, "WAVE");
-      writeStr(12, "fmt ");
-      view.setUint32(16, 16, true);    // PCM chunk size
-      view.setUint16(20, 1, true);     // PCM format
-      view.setUint16(22, 1, true);     // mono
-      view.setUint32(24, sampleRate, true);
-      view.setUint32(28, sampleRate * bytesPerSample, true);
-      view.setUint16(32, bytesPerSample, true);
-      view.setUint16(34, 16, true);    // 16-bit
-      writeStr(36, "data");
-      view.setUint32(40, dataSize, true);
-
-      let o = 44;
-      for (let i = 0; i < samples; i++) {
-        const t = i / sampleRate;
-        const env = Math.exp(-18 * t);
-        const freq = 190 - 130 * (t / duration);
-        const tone = Math.sin(2 * Math.PI * freq * t) * 0.62;
-        const noise = (Math.random() * 2 - 1) * 0.22;
-        let s = (tone + noise) * env;
-        if (s > 1) s = 1;
-        if (s < -1) s = -1;
-        view.setInt16(o, (s * 32767) | 0, true);
-        o += 2;
-      }
-
-      let bin = "";
-      const bytes = new Uint8Array(buffer);
-      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      return "data:audio/wav;base64," + btoa(bin);
-    }
-
-    function getBoomDataUri() {
-      if (!sfxBoomDataUri) sfxBoomDataUri = generateBoomDataUri();
-      return sfxBoomDataUri;
-    }
-
-    function buildSfxPool() {
-      if (sfxPool.length) return;
-      const src = getBoomDataUri();
-      for (let i = 0; i < SFX_POOL_SIZE; i++) {
-        const a = new Audio(src);
-        a.preload = "auto";
-        a.volume = 1.0;
-        a.playsInline = true;
-        a.setAttribute("webkit-playsinline", "");
-        sfxPool.push(a);
-      }
-    }
-
-    async function primeAudioElement(el) {
-      if (!el) return false;
-      const prevMuted = !!el.muted;
-      const prevVolume = el.volume;
-      try {
-        el.muted = true;
-        el.volume = 0;
-        await el.play();
-        try { el.pause(); el.currentTime = 0; } catch (e) {}
-        return true;
-      } catch (e) {
-        return false;
-      } finally {
+    function ensureSfxContext() {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      if (!sfxCtx || sfxCtx.state === "closed") {
         try {
-          el.muted = prevMuted;
-          el.volume = prevVolume;
-        } catch (e) {}
+          sfxCtx = new AC();
+          sfxMasterGain = sfxCtx.createGain();
+          sfxMasterGain.gain.value = sfxEnabled ? 1.0 : 0.0;
+          sfxMasterGain.connect(sfxCtx.destination);
+          sfxCtx.onstatechange = () => {
+            if (!sfxCtx) return;
+            if (sfxCtx.state === "running") {
+              sfxUnlocked = true;
+              sfxUnlockNeeded = false;
+            } else {
+              sfxUnlocked = false;
+              sfxUnlockNeeded = true;
+            }
+          };
+        } catch (e) {
+          sfxCtx = null;
+          sfxMasterGain = null;
+        }
       }
+      return sfxCtx;
     }
 
     function requestAudioUnlock() {
-      audioUnlockNeeded = true;
+      sfxUnlockNeeded = true;
     }
 
     async function unlockAudioNow() {
-      if (unlockInFlight) return;
-      unlockInFlight = true;
+      if (sfxUnlockInFlight) return;
+      sfxUnlockInFlight = true;
 
-      buildSfxPool();
-      const targets = [];
-      if (bgMusic) targets.push(bgMusic);
-      for (let i = 0; i < Math.min(3, sfxPool.length); i++) targets.push(sfxPool[i]);
+      const ctx = ensureSfxContext();
+      if (!ctx) {
+        sfxUnlocked = false;
+        sfxUnlockNeeded = true;
+        sfxUnlockInFlight = false;
+        return;
+      }
 
-      const results = await Promise.all(targets.map(primeAudioElement));
-      const ok = results.some(Boolean);
-      audioUnlocked = ok;
-      audioUnlockNeeded = !ok;
+      try {
+        await ctx.resume();
+
+        // Warm up with a silent click so gesture unlock is consumed now.
+        const b = ctx.createBuffer(1, 1, ctx.sampleRate);
+        const s = ctx.createBufferSource();
+        const g = ctx.createGain();
+        g.gain.value = 0;
+        s.buffer = b;
+        s.connect(g);
+        g.connect(ctx.destination);
+        s.start(0);
+
+        sfxUnlocked = (ctx.state === "running");
+        sfxUnlockNeeded = !sfxUnlocked;
+      } catch (e) {
+        sfxUnlocked = false;
+        sfxUnlockNeeded = true;
+      }
+
       applyMusicState();
-      unlockInFlight = false;
+      sfxUnlockInFlight = false;
     }
 
     function unlockAudioIfNeeded() {
-      if (!audioUnlockNeeded && audioUnlocked) return;
+      if (!sfxUnlockNeeded && sfxUnlocked) return;
       unlockAudioNow();
     }
 
@@ -521,8 +486,8 @@ applyHiDpi();
         const p = bgMusic.play();
         if (p && typeof p.catch === "function") {
           p.catch(() => {
-            audioUnlocked = false;
-            audioUnlockNeeded = true;
+            sfxUnlocked = false;
+            sfxUnlockNeeded = true;
           });
         }
       } else {
@@ -533,9 +498,19 @@ applyHiDpi();
       }
     }
 
+    function applySfxState() {
+      if (!sfxMasterGain || !sfxCtx) return;
+      try {
+        const now = sfxCtx.currentTime;
+        sfxMasterGain.gain.cancelScheduledValues(now);
+        sfxMasterGain.gain.setTargetAtTime(sfxEnabled ? 1.0 : 0.0, now, 0.01);
+      } catch (e) {}
+    }
+
     function initAudio() {
       if (!audioReady) audioReady = true;
-      buildSfxPool();
+      ensureSfxContext();
+      applySfxState();
       requestAudioUnlock();
       unlockAudioIfNeeded();
       applyMusicState();
@@ -560,8 +535,9 @@ applyHiDpi();
 
     function setSfx(on) {
       sfxEnabled = !!on;
+      ensureSfxContext();
+      applySfxState();
       if (sfxEnabled) {
-        buildSfxPool();
         requestAudioUnlock();
         unlockAudioIfNeeded();
       }
@@ -576,29 +552,47 @@ applyHiDpi();
 
     function boom() {
       if (!sfxEnabled) return;
-      if (!sfxPool.length) buildSfxPool();
-      if (!audioUnlocked) {
+
+      const nowMs = performance.now();
+      if (nowMs - lastSfxAt < MIN_SFX_GAP_MS) return;
+      lastSfxAt = nowMs;
+
+      const ctx = ensureSfxContext();
+      if (!ctx || !sfxMasterGain) return;
+
+      if (!sfxUnlocked || ctx.state !== "running") {
         requestAudioUnlock();
         unlockAudioIfNeeded();
         return;
       }
-      if (!sfxPool.length) return;
+
+      if (activeSfx >= MAX_ACTIVE_SFX) return;
+
       try {
-        const a = sfxPool[sfxPoolIndex];
-        sfxPoolIndex = (sfxPoolIndex + 1) % sfxPool.length;
-        a.pause();
-        a.currentTime = 0;
-        a.playbackRate = 0.96 + Math.random() * 0.08;
-        const p = a.play();
-        if (p && typeof p.catch === "function") {
-          p.catch(() => {
-            audioUnlocked = false;
-            audioUnlockNeeded = true;
-          });
-        }
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const now = ctx.currentTime;
+        activeSfx++;
+
+        // Original style: descending triangle boom.
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(200, now);
+        osc.frequency.exponentialRampToValueAtTime(60, now + 0.25);
+        gain.gain.setValueAtTime(0.95, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+
+        osc.connect(gain);
+        gain.connect(sfxMasterGain);
+        osc.start(now);
+        osc.stop(now + 0.25);
+
+        osc.onended = () => {
+          if (activeSfx > 0) activeSfx--;
+        };
       } catch (e) {
-        audioUnlocked = false;
-        audioUnlockNeeded = true;
+        if (activeSfx > 0) activeSfx--;
+        sfxUnlocked = false;
+        sfxUnlockNeeded = true;
       }
     }
 
