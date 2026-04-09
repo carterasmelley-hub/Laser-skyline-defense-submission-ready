@@ -273,7 +273,7 @@ applyHiDpi();
 
     // Reserve a bottom UI strip for touch buttons so they sit *under* the skyline.
     // (Keeps buttons off the city silhouettes on mobile.)
-    const UI_BAR_H = 52;
+    const UI_BAR_H = 64;
     const groundLineY = H - UI_BAR_H; // where the skyline (cities/tower base) sit
     // Touch UI (in-canvas buttons)
     // IMPORTANT: Always enable the in-canvas buttons so they reliably appear on every
@@ -3707,8 +3707,8 @@ class GoldEnemy {
 
     function layoutTouchButtons() {
       // Positions match the skyline button boxes: Q, E, MENU (under turret), R, M
-      const btnW = 132;
-      const btnH = 44;
+      const btnW = 150;
+      const btnH = 52;
       // Place buttons in the reserved UI strip *below* the skyline.
       const y = groundLineY + (UI_BAR_H - btnH) / 2;
 
@@ -3745,8 +3745,8 @@ class GoldEnemy {
 
       // Prevent overlap on small screens while keeping buttons large.
       // We keep the order (left -> right) and only adjust x positions.
-      const margin = 6;
-      let gap = 8;
+      const margin = 8;
+      let gap = 10;
 
       // If the set won't fit, reduce gap first (never below 3px).
       const totalW = (touchButtons.length * btnW) + (gap * (touchButtons.length - 1));
@@ -3757,7 +3757,7 @@ class GoldEnemy {
       const totalW2 = (touchButtons.length * btnW) + (gap * (touchButtons.length - 1));
       if (totalW2 > availW) {
         const scale = availW / totalW2;
-        const newW = Math.max(44, Math.floor(btnW * scale));
+        const newW = Math.max(52, Math.floor(btnW * scale));
         touchButtons.forEach((b) => { b.w = newW; });
       }
 
@@ -3801,7 +3801,7 @@ class GoldEnemy {
       ctx.save();
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.font = "14px monospace";
+      ctx.font = "15px monospace";
 
       for (const b of touchButtons) {
         const ok = touchButtonEnabled(b.id);
@@ -3831,9 +3831,9 @@ class GoldEnemy {
           ctx.fillText(lines[0], cx, cy);
         } else {
           const prevFont = ctx.font;
-          ctx.font = "11px monospace";
-          ctx.fillText(lines[0], cx, cy - 6);
-          ctx.fillText(lines[1], cx, cy + 7);
+          ctx.font = "12px monospace";
+          ctx.fillText(lines[0], cx, cy - 7);
+          ctx.fillText(lines[1], cx, cy + 8);
           ctx.font = prevFont;
         }
       }
@@ -3868,7 +3868,7 @@ class GoldEnemy {
       if (gameState !== "playing" && gameState !== "paused") return false;
 
       // Extra padding makes touch targets easier on phones without changing visuals.
-      const pad = 12;
+      const pad = 16;
 
       for (const b of touchButtons) {
         if (x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad) {
@@ -3894,7 +3894,7 @@ function drawHUD() {
       const best = getBestScore();
       ctx.textAlign = "right";
       ctx.fillStyle = "rgba(0,255,0,0.9)";
-      ctx.font = "14px monospace";
+      ctx.font = "15px monospace";
       ctx.fillText("BEST: " + best, W - 20, 64);
       ctx.textAlign = "left";
       ctx.fillStyle = "#0f0";
