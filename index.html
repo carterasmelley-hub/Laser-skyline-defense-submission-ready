@@ -231,6 +231,7 @@ function applyHiDpi() {
 applyHiDpi();
 
     const gameContainer = document.getElementById("gameContainer");
+    const IS_COARSE_LAYOUT = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
 
     function getViewportSize() {
       const vv = window.visualViewport;
@@ -243,6 +244,7 @@ applyHiDpi();
       if (!gameContainer) return;
       const { vw, vh } = getViewportSize();
       const aspect = W / H;
+      const isPortraitTouch = IS_COARSE_LAYOUT && vh > vw;
 
       let cw = vw;
       let ch = vh;
@@ -256,8 +258,18 @@ applyHiDpi();
       cw = Math.max(1, Math.floor(cw));
       ch = Math.max(1, Math.floor(ch));
 
+      if (isPortraitTouch) {
+        const zoomedW = Math.min(Math.floor(vw * 1.1), Math.floor(vh * aspect * 0.9));
+        if (zoomedW > cw) {
+          cw = zoomedW;
+          ch = Math.max(1, Math.floor(cw / aspect));
+        }
+      }
+
       gameContainer.style.width = `${cw}px`;
       gameContainer.style.height = `${ch}px`;
+      gameContainer.style.marginTop = isPortraitTouch ? `${Math.max(0, Math.floor((vh - ch) * 0.08))}px` : "0px";
+      document.body.style.alignItems = isPortraitTouch ? "flex-start" : "center";
     
       applyHiDpi();
     }
@@ -376,6 +388,9 @@ applyHiDpi();
     let sfxBoomBuffer = null;
     let sfxKeepAliveNode = null;
     let sfxKeepAliveGain = null;
+    let musicSourceNode = null;
+    let musicGainNode = null;
+    let musicGraphCtx = null;
     let sfxUnlockNeeded = true;
     let sfxUnlocked = false;
     let sfxUnlockInFlight = false;
@@ -556,8 +571,47 @@ applyHiDpi();
         }
       }
       ensureSfxBoomBuffer();
+      ensureMusicGraph();
       syncSfxKeepAlive();
       return sfxCtx;
+    }
+
+    function ensureMusicGraph() {
+      const ctx = sfxCtx;
+      if (!ctx || !bgMusic) return null;
+      if (musicGraphCtx === ctx && musicSourceNode && musicGainNode) return musicGainNode;
+      if (musicGraphCtx && musicGraphCtx !== ctx) {
+        try { musicSourceNode.disconnect(); } catch (e) {}
+        try { musicGainNode.disconnect(); } catch (e) {}
+        musicSourceNode = null;
+        musicGainNode = null;
+        musicGraphCtx = null;
+      }
+      try {
+        musicSourceNode = ctx.createMediaElementSource(bgMusic);
+        musicGainNode = ctx.createGain();
+        musicGainNode.gain.value = 0;
+        musicSourceNode.connect(musicGainNode);
+        musicGainNode.connect(ctx.destination);
+        musicGraphCtx = ctx;
+      } catch (e) {
+        // If the browser refuses the media-element graph, keep the plain HTMLAudio fallback.
+      }
+      return musicGainNode;
+    }
+
+    function applyMusicGain() {
+      const target = musicEnabled ? (MUSIC_GAIN_LEVEL * musicVolume) : 0.0;
+      if (musicGainNode && sfxCtx) {
+        try {
+          const now = sfxCtx.currentTime;
+          musicGainNode.gain.cancelScheduledValues(now);
+          musicGainNode.gain.setTargetAtTime(target, now, 0.01);
+          bgMusic.volume = 1.0;
+          return;
+        } catch (e) {}
+      }
+      bgMusic.volume = target;
     }
 
     function stopSfxKeepAlive() {
@@ -593,6 +647,13 @@ applyHiDpi();
 
     function stopMusicPlayback() {
       if (!bgMusic) return;
+      if (musicGainNode && sfxCtx) {
+        try {
+          const now = sfxCtx.currentTime;
+          musicGainNode.gain.cancelScheduledValues(now);
+          musicGainNode.gain.setValueAtTime(0, now);
+        } catch (e) {}
+      }
       try {
         bgMusic.pause();
         bgMusic.currentTime = 0;
@@ -751,10 +812,11 @@ applyHiDpi();
     function applyMusicState() {
       if (!bgMusic) return;
       stopSessionHoldAudio();
+      ensureMusicGraph();
       if (musicEnabled) {
         clearMediaSessionState();
         bgMusic.muted = false;
-        bgMusic.volume = MUSIC_GAIN_LEVEL * musicVolume;
+        applyMusicGain();
         const p = bgMusic.play();
         if (p && typeof p.catch === "function") {
           p.catch(() => {
@@ -793,6 +855,7 @@ applyHiDpi();
       if (!audioReady) audioReady = true;
       if (firstInit) {
         ensureSfxContext();
+        ensureMusicGraph();
         applySfxState();
         applyMusicState();
       }
@@ -4266,13 +4329,22 @@ function drawHUD() {
       ctx.fill();
     }
 
+    function audioSliderRowRect(kind) {
+      const inPause = (gameState === "paused");
+      if (kind === "music") return inPause ? pauseMusicBtn : settingsMusic;
+      if (kind === "sfx") return inPause ? pauseSfxBtn : settingsSfx;
+      return null;
+    }
+
     function updatePauseSlider(kind, x) {
+      const rowRect = audioSliderRowRect(kind);
+      if (!rowRect) return false;
       if (kind === "music") {
-        setMusicVolume(pauseSliderValueFromX(pauseMusicBtn, x));
+        setMusicVolume(pauseSliderValueFromX(rowRect, x));
         return true;
       }
       if (kind === "sfx") {
-        setSfxVolume(pauseSliderValueFromX(pauseSfxBtn, x));
+        setSfxVolume(pauseSliderValueFromX(rowRect, x));
         return true;
       }
       return false;
@@ -5000,7 +5072,7 @@ function drawHUD() {
 
       // Info / progress
       ctx.strokeRect(pauseHelpBtn.x, pauseHelpBtn.y, pauseHelpBtn.w, pauseHelpBtn.h);
-      ctx.fillText("HELP / HOW TO PLAY", W/2, pauseHelpBtn.y + pauseHelpBtn.h / 2 + 2);
+      ctx.fillText("HELP", W/2, pauseHelpBtn.y + pauseHelpBtn.h / 2 + 2);
 
       ctx.strokeRect(pauseLeaderboardBtn.x, pauseLeaderboardBtn.y, pauseLeaderboardBtn.w, pauseLeaderboardBtn.h);
       ctx.fillText("LEADERBOARD", W/2, pauseLeaderboardBtn.y + pauseLeaderboardBtn.h / 2 + 2);
