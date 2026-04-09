@@ -3068,8 +3068,9 @@ class GoldEnemy {
       if (!canFire() || !m.alive) return false;
       if (m.invuln > 0) return false;
 
-      // Precision missiles: hitbox is the circle (edge-touch counts)
-      if (m.type === "precision") {
+      // Precision missiles: hitbox is the laser-tip circle (edge-touch counts).
+      // This applies to both standard precision and white precision enemies.
+      if (m.type === "precision" || m.type === "precisionWhite") {
         const tipR = precisionTipRadius();
         const dx = m.x - mouse.x;
         const dy = m.y - mouse.y;
