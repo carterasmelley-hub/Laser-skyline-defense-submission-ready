@@ -330,11 +330,12 @@ applyHiDpi();
     }
 
     // -------- IMAGES --------
-    // Embedded assets (single-file build for easy sharing / Google Drive)
     const EMBED_MENU_BG = "assets/menu-bg.webp";
     const EMBED_PLAY_BG = "assets/play-bg.webp";
     const EMBED_UPGRADE_BG = "assets/upgrade-bg.webp";
     const EMBED_MUSIC = "assets/bg-music.mp3";
+    const EMBED_SFX = "assets/sfx-boom.mp3";
+    const EMBED_SILENCE_LOOP = "assets/silence-loop.mp3";
 
     const menuBg = new Image();
     menuBg.src = EMBED_MENU_BG;
@@ -364,6 +365,10 @@ applyHiDpi();
     let musicEnabled = true;
     let sfxEnabled = true;
     let audioReady = false;
+    let musicVolume = 1;
+    let sfxVolume = 1;
+    let lastMusicVolume = 1;
+    let lastSfxVolume = 1;
 
     // SFX uses WebAudio (fast, low-latency); music uses <audio>.
     let sfxCtx = null;
@@ -388,10 +393,56 @@ applyHiDpi();
     const FALLBACK_MIN_GAP_MS = IS_MOBILE_AUDIO ? 90 : 45;
     const MIN_UNLOCK_RETRY_MS = 90;
     const FALLBACK_SFX_POOL_SIZE = 4;
+    const MUSIC_GAIN_LEVEL = 0.34;
+    const SFX_GAIN_LEVEL = 1.5;
+    const AUDIO_PREFS_KEY = "laserSkylineAudioPrefsV1";
     const fallbackSfxPool = [];
     let fallbackSfxIndex = 0;
     let fallbackBoomDataUri = null;
     const DEBUG_AUDIO = /(?:\?|&)debugAudio=1(?:&|$)/.test(window.location.search || "");
+    const MOBILE_HOLD_AUDIO_SESSION = IS_MOBILE_AUDIO;
+    const sessionHoldAudio = new Audio(EMBED_SILENCE_LOOP);
+
+    sessionHoldAudio.preload = "auto";
+    sessionHoldAudio.loop = true;
+    sessionHoldAudio.volume = 0.001;
+    sessionHoldAudio.playsInline = true;
+    sessionHoldAudio.setAttribute("webkit-playsinline", "");
+
+    function clamp01(v) {
+      return Math.max(0, Math.min(1, Number(v) || 0));
+    }
+
+    function saveAudioPrefs() {
+      try {
+        localStorage.setItem(AUDIO_PREFS_KEY, JSON.stringify({
+          musicVolume,
+          sfxVolume,
+          musicEnabled,
+          sfxEnabled,
+          lastMusicVolume,
+          lastSfxVolume
+        }));
+      } catch (e) {}
+    }
+
+    function loadAudioPrefs() {
+      try {
+        const raw = localStorage.getItem(AUDIO_PREFS_KEY);
+        if (!raw) return;
+        const prefs = JSON.parse(raw);
+        if (!prefs || typeof prefs !== "object") return;
+        musicVolume = clamp01(prefs.musicVolume ?? musicVolume);
+        sfxVolume = clamp01(prefs.sfxVolume ?? sfxVolume);
+        lastMusicVolume = clamp01(prefs.lastMusicVolume ?? Math.max(musicVolume, 1));
+        lastSfxVolume = clamp01(prefs.lastSfxVolume ?? Math.max(sfxVolume, 1));
+        musicEnabled = !!prefs.musicEnabled && musicVolume > 0;
+        sfxEnabled = !!prefs.sfxEnabled && sfxVolume > 0;
+        if (musicVolume > 0) lastMusicVolume = musicVolume;
+        if (sfxVolume > 0) lastSfxVolume = sfxVolume;
+      } catch (e) {}
+    }
+    loadAudioPrefs();
 
     function generateFallbackBoomDataUri() {
       const sampleRate = 22050;
@@ -440,13 +491,18 @@ applyHiDpi();
 
     function ensureFallbackSfx() {
       if (fallbackSfxPool.length) return;
-      if (!fallbackBoomDataUri) fallbackBoomDataUri = generateFallbackBoomDataUri();
       for (let i = 0; i < FALLBACK_SFX_POOL_SIZE; i++) {
-        const a = new Audio(fallbackBoomDataUri);
+        const a = new Audio(EMBED_SFX);
         a.preload = "auto";
         a.volume = 1.0;
         a.playsInline = true;
         a.setAttribute("webkit-playsinline", "");
+        a.addEventListener("error", () => {
+          if (a.src === fallbackBoomDataUri) return;
+          if (!fallbackBoomDataUri) fallbackBoomDataUri = generateFallbackBoomDataUri();
+          a.src = fallbackBoomDataUri;
+          try { a.load(); } catch (e) {}
+        }, { once: true });
         fallbackSfxPool.push(a);
       }
       fallbackSfxReady = true;
@@ -478,7 +534,7 @@ applyHiDpi();
         try {
           sfxCtx = new AC();
           sfxMasterGain = sfxCtx.createGain();
-          sfxMasterGain.gain.value = sfxEnabled ? 1.0 : 0.0;
+          sfxMasterGain.gain.value = sfxEnabled ? (SFX_GAIN_LEVEL * sfxVolume) : 0.0;
           sfxMasterGain.connect(sfxCtx.destination);
           sfxBoomBuffer = null;
           sfxKeepAliveNode = null;
@@ -514,6 +570,34 @@ applyHiDpi();
       }
       sfxKeepAliveNode = null;
       sfxKeepAliveGain = null;
+    }
+
+    function stopSessionHoldAudio() {
+      try {
+        sessionHoldAudio.pause();
+        sessionHoldAudio.currentTime = 0;
+      } catch (e) {}
+    }
+
+    function clearMediaSessionState() {
+      try {
+        if ("mediaSession" in navigator && navigator.mediaSession) {
+          navigator.mediaSession.metadata = null;
+          navigator.mediaSession.playbackState = "none";
+          ["play", "pause", "seekbackward", "seekforward", "previoustrack", "nexttrack", "stop"].forEach((action) => {
+            try { navigator.mediaSession.setActionHandler(action, null); } catch (e) {}
+          });
+        }
+      } catch (e) {}
+    }
+
+    function stopMusicPlayback() {
+      if (!bgMusic) return;
+      try {
+        bgMusic.pause();
+        bgMusic.currentTime = 0;
+      } catch (e) {}
+      clearMediaSessionState();
     }
 
     function syncSfxKeepAlive() {
@@ -610,13 +694,12 @@ applyHiDpi();
       }
 
       let fallbackOk = false;
-      if (!webAudioOk) {
-        ensureFallbackSfx();
-        if (fallbackSfxPool.length) {
-          const ok = await primeAudioElement(fallbackSfxPool[0]);
-          fallbackOk = !!ok;
-        }
+      ensureFallbackSfx();
+      if (fallbackSfxPool.length) {
+        const ok = await primeAudioElement(fallbackSfxPool[0]);
+        fallbackOk = !!ok;
       }
+      fallbackOk = (await primeAudioElement(sessionHoldAudio)) || fallbackOk;
       fallbackSfxReady = fallbackSfxReady || fallbackOk;
 
       sfxUnlocked = webAudioOk || fallbackOk;
@@ -628,8 +711,8 @@ applyHiDpi();
     }
 
     function unlockAudioIfNeeded() {
-      kickAudioFromGesture();
       if (!sfxUnlockNeeded && sfxUnlocked) return;
+      kickAudioFromGesture();
       if (sfxUnlockInFlight) return;
       const t = performance.now();
       if (t - lastUnlockAttemptMs < MIN_UNLOCK_RETRY_MS) return;
@@ -637,7 +720,7 @@ applyHiDpi();
       unlockAudioNow();
     }
 
-    ["pointerdown", "touchstart", "touchend", "mousedown", "click", "keydown"].forEach((ev) => {
+    ["pointerdown", "touchstart", "mousedown", "keydown"].forEach((ev) => {
       const opts = ev === "keydown" ? { capture: true } : { passive: false, capture: true };
       document.addEventListener(ev, unlockAudioIfNeeded, opts);
     });
@@ -667,9 +750,11 @@ applyHiDpi();
 
     function applyMusicState() {
       if (!bgMusic) return;
-      bgMusic.muted = !musicEnabled;
-      bgMusic.volume = musicEnabled ? 0.7 : 0.0;
+      stopSessionHoldAudio();
       if (musicEnabled) {
+        clearMediaSessionState();
+        bgMusic.muted = false;
+        bgMusic.volume = MUSIC_GAIN_LEVEL * musicVolume;
         const p = bgMusic.play();
         if (p && typeof p.catch === "function") {
           p.catch(() => {
@@ -677,10 +762,17 @@ applyHiDpi();
           });
         }
       } else {
-        try {
-          bgMusic.pause();
-          bgMusic.currentTime = 0;
-        } catch (e) {}
+        if (MOBILE_HOLD_AUDIO_SESSION && sfxEnabled) {
+          stopMusicPlayback();
+          try {
+            sessionHoldAudio.muted = false;
+            sessionHoldAudio.volume = 0.001;
+            const p = sessionHoldAudio.play();
+            if (p && typeof p.catch === "function") p.catch(() => {});
+          } catch (e) {}
+        } else {
+          stopMusicPlayback();
+        }
       }
       syncSfxKeepAlive();
     }
@@ -690,18 +782,24 @@ applyHiDpi();
       try {
         const now = sfxCtx.currentTime;
         sfxMasterGain.gain.cancelScheduledValues(now);
-        sfxMasterGain.gain.setTargetAtTime(sfxEnabled ? 1.0 : 0.0, now, 0.01);
+        sfxMasterGain.gain.setTargetAtTime(sfxEnabled ? (SFX_GAIN_LEVEL * sfxVolume) : 0.0, now, 0.01);
       } catch (e) {}
+      if (!sfxEnabled) stopSessionHoldAudio();
       syncSfxKeepAlive();
     }
 
     function initAudio() {
+      const firstInit = !audioReady;
       if (!audioReady) audioReady = true;
-      ensureSfxContext();
-      applySfxState();
-      requestAudioUnlock();
-      unlockAudioIfNeeded();
-      applyMusicState();
+      if (firstInit) {
+        ensureSfxContext();
+        applySfxState();
+        applyMusicState();
+      }
+      if (firstInit || sfxUnlockNeeded || !sfxUnlocked) {
+        requestAudioUnlock();
+        unlockAudioIfNeeded();
+      }
     }
 
     // -------- NAV HELPERS --------
@@ -714,23 +812,77 @@ applyHiDpi();
 
     function setMusic(on) {
       musicEnabled = !!on;
-      if (musicEnabled) {
+      if (musicEnabled && musicVolume <= 0) {
+        musicVolume = Math.max(0.05, lastMusicVolume || 1);
+      }
+      if (!musicEnabled) {
+        lastMusicVolume = Math.max(0.05, musicVolume || lastMusicVolume || 1);
+      }
+      if (musicEnabled || sfxEnabled) {
         requestAudioUnlock();
+        kickAudioFromGesture();
         unlockAudioIfNeeded();
       }
       applyMusicState();
       syncSfxKeepAlive();
+      saveAudioPrefs();
     }
 
     function setSfx(on) {
       sfxEnabled = !!on;
+      if (sfxEnabled && sfxVolume <= 0) {
+        sfxVolume = Math.max(0.05, lastSfxVolume || 1);
+      }
+      if (!sfxEnabled) {
+        lastSfxVolume = Math.max(0.05, sfxVolume || lastSfxVolume || 1);
+      }
       ensureSfxContext();
       applySfxState();
       if (sfxEnabled) {
         requestAudioUnlock();
+        kickAudioFromGesture();
         unlockAudioIfNeeded();
       }
+      // Re-evaluate mobile music-session hold mode when SFX toggles.
+      if (!musicEnabled) applyMusicState();
       syncSfxKeepAlive();
+      saveAudioPrefs();
+    }
+
+    function setMusicVolume(value) {
+      const next = clamp01(value);
+      musicVolume = next;
+      if (next > 0) {
+        lastMusicVolume = next;
+        musicEnabled = true;
+        requestAudioUnlock();
+        kickAudioFromGesture();
+        unlockAudioIfNeeded();
+      } else {
+        musicEnabled = false;
+      }
+      applyMusicState();
+      syncSfxKeepAlive();
+      saveAudioPrefs();
+    }
+
+    function setSfxVolume(value) {
+      const next = clamp01(value);
+      sfxVolume = next;
+      if (next > 0) {
+        lastSfxVolume = next;
+        sfxEnabled = true;
+        requestAudioUnlock();
+        kickAudioFromGesture();
+        unlockAudioIfNeeded();
+      } else {
+        sfxEnabled = false;
+      }
+      ensureSfxContext();
+      applySfxState();
+      if (!musicEnabled) applyMusicState();
+      syncSfxKeepAlive();
+      saveAudioPrefs();
     }
 
     // M key and pause "Audio" button toggle both at once.
@@ -775,7 +927,7 @@ applyHiDpi();
 
           src.buffer = sfxBoomBuffer;
           src.playbackRate.setValueAtTime(0.94 + Math.random() * 0.14, now);
-          gain.gain.setValueAtTime(0.92, now);
+          gain.gain.setValueAtTime(1.35, now);
           gain.gain.exponentialRampToValueAtTime(0.015, now + dur);
 
           src.connect(gain);
@@ -1496,6 +1648,7 @@ function bossStartIfNeeded() {
     // After that release, the next normal click/tap selects an upgrade (single intentional click).
     let upgradeIgnoreUntilRelease = false;
     let pointerIsDown = false;      // mouse or touch currently down
+    let activeAudioSlider = null;   // "music" | "sfx" while dragging settings/pause slider
 
     function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
@@ -4049,14 +4202,14 @@ function drawHUD() {
 
     // Pause (in-game settings) order:
     // Resume, Restart, Return to Menu, (divider), Help, Leaderboard, (divider), Music, SFX
-    const pauseBox      = { x: W/2 - 260, y: H/2 - 205, w: 520, h: 460 };
+    const pauseBox      = { x: W/2 - 260, y: H/2 - 205, w: 520, h: 480 };
     const pauseResume   = { x: W/2 - 160, y: pauseBox.y + 64, w: 320, h: 40 };
     const pauseRestart  = { x: W/2 - 160, y: pauseResume.y + 46, w: 320, h: 40 };
     const pauseMenuBtn  = { x: W/2 - 160, y: pauseRestart.y + 46, w: 320, h: 40 };
     const pauseHelpBtn  = { x: W/2 - 160, y: pauseMenuBtn.y + 60, w: 320, h: 40 };
     const pauseLeaderboardBtn = { x: W/2 - 160, y: pauseHelpBtn.y + 46, w: 320, h: 40 };
-    const pauseMusicBtn = { x: W/2 - 160, y: pauseLeaderboardBtn.y + 60, w: 320, h: 40 };
-    const pauseSfxBtn   = { x: W/2 - 160, y: pauseMusicBtn.y + 46, w: 320, h: 40 };
+    const pauseMusicBtn = { x: W/2 - 160, y: pauseLeaderboardBtn.y + 60, w: 320, h: 54 };
+    const pauseSfxBtn   = { x: W/2 - 160, y: pauseMusicBtn.y + 60, w: 320, h: 54 };
 
     const helpBackBtn = { x: W/2 - 90, y: pauseBox.y + pauseBox.h - 70, w: 180, h: 40 };
     // Leaderboard back button is positioned relative to the leaderboard panel so it never intersects the panel border
@@ -4065,6 +4218,64 @@ function drawHUD() {
 
     function rectHit(r, x, y) {
       return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+    }
+
+    function pauseSliderTrackRect(rowRect) {
+      return {
+        x: rowRect.x + 110,
+        y: rowRect.y + rowRect.h - 18,
+        w: rowRect.w - 138,
+        h: 6
+      };
+    }
+
+    function pauseSliderHit(rowRect, x, y) {
+      const track = pauseSliderTrackRect(rowRect);
+      const pad = 12;
+      return x >= track.x - pad && x <= track.x + track.w + pad &&
+             y >= track.y - 14 && y <= track.y + track.h + 14;
+    }
+
+    function pauseSliderValueFromX(rowRect, x) {
+      const track = pauseSliderTrackRect(rowRect);
+      return clamp01((x - track.x) / Math.max(1, track.w));
+    }
+
+    function drawPauseSlider(rowRect, label, value) {
+      const pct = Math.round(clamp01(value) * 100);
+      const track = pauseSliderTrackRect(rowRect);
+      const thumbX = track.x + track.w * clamp01(value);
+
+      ctx.strokeRect(rowRect.x, rowRect.y, rowRect.w, rowRect.h);
+      ctx.save();
+      ctx.textBaseline = "middle";
+      ctx.textAlign = "left";
+      ctx.fillText(label, rowRect.x + 14, rowRect.y + 17);
+      ctx.textAlign = "right";
+      ctx.fillText(pct + "%", rowRect.x + rowRect.w - 14, rowRect.y + 17);
+      ctx.restore();
+
+      ctx.save();
+      ctx.globalAlpha = 0.45;
+      ctx.fillRect(track.x, track.y, track.w, track.h);
+      ctx.restore();
+      ctx.fillRect(track.x, track.y, track.w * clamp01(value), track.h);
+      ctx.strokeRect(track.x, track.y - 1, track.w, track.h + 2);
+      ctx.beginPath();
+      ctx.arc(thumbX, track.y + track.h / 2, 8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function updatePauseSlider(kind, x) {
+      if (kind === "music") {
+        setMusicVolume(pauseSliderValueFromX(pauseMusicBtn, x));
+        return true;
+      }
+      if (kind === "sfx") {
+        setSfxVolume(pauseSliderValueFromX(pauseSfxBtn, x));
+        return true;
+      }
+      return false;
     }
 
     // -------- DIFFICULTY (Easy / Normal / Hard) --------
@@ -4611,6 +4822,7 @@ function drawHUD() {
       ctx.fillStyle = "#0f0";
       ctx.font = "18px monospace";
       ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
 
       ctx.font = "18px monospace";
       ctx.strokeStyle = "#0f0";
@@ -4618,14 +4830,10 @@ function drawHUD() {
 
       // Difficulty
       ctx.strokeRect(settingsDifficultyBtn.x, settingsDifficultyBtn.y, settingsDifficultyBtn.w, settingsDifficultyBtn.h);
-      ctx.fillText("DIFFICULTY: " + difficultyLabel(selectedDifficulty), W/2, settingsDifficultyBtn.y + 30);
+      ctx.fillText("DIFFICULTY: " + difficultyLabel(selectedDifficulty), W/2, settingsDifficultyBtn.y + settingsDifficultyBtn.h / 2 + 2);
 
-      ctx.strokeRect(settingsMusic.x, settingsMusic.y, settingsMusic.w, settingsMusic.h);
-      ctx.fillText("Music: " + (musicEnabled ? "ON" : "OFF"), W/2, settingsMusic.y + 30);
-
-
-      ctx.strokeRect(settingsSfx.x, settingsSfx.y, settingsSfx.w, settingsSfx.h);
-      ctx.fillText("SFX: " + (sfxEnabled ? "ON" : "OFF"), W/2, settingsSfx.y + 30);
+      drawPauseSlider(settingsMusic, "MUSIC", musicVolume);
+      drawPauseSlider(settingsSfx, "SFX", sfxVolume);
 
       // Small divider/space
       ctx.save();
@@ -4639,10 +4847,10 @@ function drawHUD() {
       ctx.font = "18px monospace";
       ctx.fillStyle = "#0f0";
       ctx.strokeRect(settingsHelpBtn.x, settingsHelpBtn.y, settingsHelpBtn.w, settingsHelpBtn.h);
-      ctx.fillText("HELP", W/2, settingsHelpBtn.y + 30);
+      ctx.fillText("HELP", W/2, settingsHelpBtn.y + settingsHelpBtn.h / 2 + 2);
 
       ctx.strokeRect(settingsLeaderboardBtn.x, settingsLeaderboardBtn.y, settingsLeaderboardBtn.w, settingsLeaderboardBtn.h);
-      ctx.fillText("LEADERBOARD", W/2, settingsLeaderboardBtn.y + 30);
+      ctx.fillText("LEADERBOARD", W/2, settingsLeaderboardBtn.y + settingsLeaderboardBtn.h / 2 + 2);
 
       // Small divider/space
       ctx.save();
@@ -4654,7 +4862,7 @@ function drawHUD() {
       ctx.restore();
 
       ctx.strokeRect(settingsBack.x, settingsBack.y, settingsBack.w, settingsBack.h);
-      ctx.fillText("BACK", W/2, settingsBack.y + 32);
+      ctx.fillText("BACK", W/2, settingsBack.y + settingsBack.h / 2 + 2);
     }
 
 
@@ -4766,19 +4974,20 @@ function drawHUD() {
       ctx.fillStyle = "#0f0";
       ctx.font = "28px monospace";
       ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
       ctx.fillText("PAUSED", W/2, pauseBox.y + 40);
 
       ctx.font = "18px monospace";
 
       // Primary actions
       ctx.strokeRect(pauseResume.x, pauseResume.y, pauseResume.w, pauseResume.h);
-      ctx.fillText("RESUME", W/2, pauseResume.y + 26);
+      ctx.fillText("RESUME", W/2, pauseResume.y + pauseResume.h / 2 + 2);
 
       ctx.strokeRect(pauseRestart.x, pauseRestart.y, pauseRestart.w, pauseRestart.h);
-      ctx.fillText("RESTART GAME", W/2, pauseRestart.y + 26);
+      ctx.fillText("RESTART GAME", W/2, pauseRestart.y + pauseRestart.h / 2 + 2);
 
       ctx.strokeRect(pauseMenuBtn.x, pauseMenuBtn.y, pauseMenuBtn.w, pauseMenuBtn.h);
-      ctx.fillText("RETURN TO MENU", W/2, pauseMenuBtn.y + 26);
+      ctx.fillText("RETURN TO MENU", W/2, pauseMenuBtn.y + pauseMenuBtn.h / 2 + 2);
 
       // Divider
       ctx.save();
@@ -4791,10 +5000,10 @@ function drawHUD() {
 
       // Info / progress
       ctx.strokeRect(pauseHelpBtn.x, pauseHelpBtn.y, pauseHelpBtn.w, pauseHelpBtn.h);
-      ctx.fillText("HELP / HOW TO PLAY", W/2, pauseHelpBtn.y + 26);
+      ctx.fillText("HELP / HOW TO PLAY", W/2, pauseHelpBtn.y + pauseHelpBtn.h / 2 + 2);
 
       ctx.strokeRect(pauseLeaderboardBtn.x, pauseLeaderboardBtn.y, pauseLeaderboardBtn.w, pauseLeaderboardBtn.h);
-      ctx.fillText("LEADERBOARD", W/2, pauseLeaderboardBtn.y + 26);
+      ctx.fillText("LEADERBOARD", W/2, pauseLeaderboardBtn.y + pauseLeaderboardBtn.h / 2 + 2);
 
       // Divider
       ctx.save();
@@ -4805,12 +5014,9 @@ function drawHUD() {
       ctx.stroke();
       ctx.restore();
 
-      // Audio toggles
-      ctx.strokeRect(pauseMusicBtn.x, pauseMusicBtn.y, pauseMusicBtn.w, pauseMusicBtn.h);
-      ctx.fillText("Music: " + (musicEnabled ? "ON" : "OFF"), W/2, pauseMusicBtn.y + 26);
-
-      ctx.strokeRect(pauseSfxBtn.x, pauseSfxBtn.y, pauseSfxBtn.w, pauseSfxBtn.h);
-      ctx.fillText("SFX: " + (sfxEnabled ? "ON" : "OFF"), W/2, pauseSfxBtn.y + 26);
+      // Audio sliders
+      drawPauseSlider(pauseMusicBtn, "MUSIC", musicVolume);
+      drawPauseSlider(pauseSfxBtn, "SFX", sfxVolume);
 
       ctx.restore();
     }
@@ -5361,8 +5567,18 @@ function canvasPos(evt) {
 
       if (rectHit(settingsDifficultyBtn, x, y)) { cycleSelectedDifficulty(); return; }
 
-      if (rectHit(settingsMusic, x, y)) { initAudio(); setMusic(!musicEnabled); return; }
-      if (rectHit(settingsSfx, x, y)) { initAudio(); setSfx(!sfxEnabled); return; }
+      if (rectHit(settingsMusic, x, y)) {
+        initAudio();
+        activeAudioSlider = "music";
+        updatePauseSlider("music", x);
+        return;
+      }
+      if (rectHit(settingsSfx, x, y)) {
+        initAudio();
+        activeAudioSlider = "sfx";
+        updatePauseSlider("sfx", x);
+        return;
+      }
       if (rectHit(settingsHelpBtn, x, y)) { settingsSub = "help"; helpScroll = 0; return; }
       if (rectHit(settingsLeaderboardBtn, x, y)) { settingsSub = "leaderboard"; return; }
       if (rectHit(settingsBack, x, y)) { gameState = "menu"; settingsSub = "main"; return; }
@@ -5391,8 +5607,18 @@ function canvasPos(evt) {
 
       if (rectHit(pauseHelpBtn, x, y)) { pauseSub = "help"; helpScroll = 0; return; }
       if (rectHit(pauseMenuBtn, x, y)) { gameState = "menu"; gameOver = false; pauseSub = "main"; return; }
-      if (rectHit(pauseMusicBtn, x, y)) { initAudio(); setMusic(!musicEnabled); return; }
-      if (rectHit(pauseSfxBtn, x, y)) { initAudio(); setSfx(!sfxEnabled); return; }
+      if (rectHit(pauseMusicBtn, x, y)) {
+        initAudio();
+        activeAudioSlider = "music";
+        updatePauseSlider("music", x);
+        return;
+      }
+      if (rectHit(pauseSfxBtn, x, y)) {
+        initAudio();
+        activeAudioSlider = "sfx";
+        updatePauseSlider("sfx", x);
+        return;
+      }
       if (rectHit(pauseLeaderboardBtn, x, y)) { pauseSub = "leaderboard"; return; }
 }
 
@@ -5400,6 +5626,9 @@ function canvasPos(evt) {
       if (gameState === "playing" || gameState === "paused") {
         const p = canvasPos(e);
         mouse.x = p.x; mouse.y = p.y;
+        if ((gameState === "paused" || gameState === "settings") && activeAudioSlider) {
+          updatePauseSlider(activeAudioSlider, p.x);
+        }
       }
 
     });
@@ -5412,6 +5641,7 @@ function canvasPos(evt) {
 
       if (e.button !== 0) return;
       pointerIsDown = true;
+      activeAudioSlider = null;
 
       const p = canvasPos(e);
       // Touch-style in-canvas buttons (also works with mouse if you click them)
@@ -5437,6 +5667,7 @@ function canvasPos(evt) {
     canvas.addEventListener("mouseup", (e) => {
       if (e.button !== 0) return;
       pointerIsDown = false;
+      activeAudioSlider = null;
 
       if (gameState === "upgrade") {
         const p = canvasPos(e);
@@ -5464,6 +5695,7 @@ function canvasPos(evt) {
         if (!mobileControlsEnabled || !mobileFireHeld) firing = false;
       }
       pointerIsDown = false;
+      activeAudioSlider = null;
     });
 
     canvas.addEventListener("wheel", (e) => {
@@ -5481,6 +5713,7 @@ function canvasPos(evt) {
     canvas.addEventListener("touchstart", (e) => {
       e.preventDefault();
       pointerIsDown = true;
+      activeAudioSlider = null;
 
       // Tap anywhere on Game Over to restart (same as mouse click)
       if (gameState === "gameover") {
@@ -5545,6 +5778,13 @@ function canvasPos(evt) {
         return;
       }
 
+      if ((gameState === "paused" || gameState === "settings") && activeAudioSlider) {
+        mouse.x = p.x;
+        mouse.y = p.y;
+        updatePauseSlider(activeAudioSlider, p.x);
+        return;
+      }
+
       // Keep aim position updated while playing/paused
       if (gameState !== "playing" && gameState !== "paused") return;
       mouse.x = p.x;
@@ -5562,6 +5802,7 @@ function canvasPos(evt) {
         return;
       }
       pointerIsDown = false;
+      activeAudioSlider = null;
 
       // End help drag
       if (helpTouchActive) {
@@ -5598,6 +5839,7 @@ function canvasPos(evt) {
         return;
       }
       pointerIsDown = false;
+      activeAudioSlider = null;
       if (gameState === "playing") {
         if (!mobileControlsEnabled || !mobileFireHeld) firing = false;
       }
