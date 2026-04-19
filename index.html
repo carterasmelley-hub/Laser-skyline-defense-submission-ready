@@ -331,23 +331,15 @@ applyHiDpi();
     }
 
     // -------- IMAGES --------
-    const EMBED_MENU_BG = "assets/menu-bg.webp";
-    const EMBED_PLAY_BG = "assets/play-bg.webp";
-    const EMBED_UPGRADE_BG = "assets/upgrade-bg.webp";
+    const EMBED_PLAY_BG = "assets/play-bg.png";
+    const EMBED_UPGRADE_BG = "assets/upgrade-bg.png";
     const EMBED_MUSIC = "assets/bg-music.mp3";
     const EMBED_SFX = "assets/sfx-boom.mp3";
     const EMBED_SILENCE_LOOP = "assets/silence-loop.mp3";
 
-    const menuBg = new Image();
-    menuBg.src = EMBED_MENU_BG;
-
     const playBg = new Image();
     playBg.src = EMBED_PLAY_BG;
 
-    // Alias used by the Settings screen renderer (keeps background consistent)
-    const gameBgImg = playBg;
-
-    // Upgrade background image
     const upgradeBg = new Image();
     upgradeBg.src = EMBED_UPGRADE_BG;
 
@@ -385,7 +377,10 @@ applyHiDpi();
     let sfxUnlockInFlight = false;
     let fallbackSfxReady = false;
     const IS_COARSE_POINTER = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
-    const IS_MOBILE_AUDIO = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || "") || IS_COARSE_POINTER;
+    const HAS_TOUCH_INPUT = ("ontouchstart" in window) || ((navigator.maxTouchPoints || 0) > 0);
+    const IS_PHONE_SIZED_VIEW = Math.min(window.innerWidth || 0, window.innerHeight || 0) > 0 &&
+      Math.min(window.innerWidth || 0, window.innerHeight || 0) <= 900;
+    const IS_MOBILE_AUDIO = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || "") || IS_COARSE_POINTER || HAS_TOUCH_INPUT;
 
     // Simple load guard: prevent too many concurrent booms on mobile.
     let lastSfxAt = 0;
@@ -1077,8 +1072,6 @@ applyHiDpi();
     }
     function enterGameOver(reason) {
       if (gameState === "gameover") {
-        resetGame();
-        gameState = "playing";
         return;
       }
       gameOver = true;
@@ -1688,6 +1681,7 @@ function bossStartIfNeeded() {
     // Gold bonus enemy behavior
     const GOLD_SPAWN_CHANCE = 0.10; // 10% per level
     let bonusUpgradePendingCount = 0; // how many extra upgrade screens are queued
+    let currentUpgradeScreenIsBonus = false;
 
     // Gold spawn timing: spawn later in the wave (not at the very start)
     let waveElapsed = 0;
@@ -1747,6 +1741,12 @@ function bossStartIfNeeded() {
 
     function precisionTipRadius() {
       return 10 + (precisionSizeLevel === 1 ? 6 : precisionSizeLevel >= 2 ? 12 : 0);
+    }
+    function precisionEnemyHitRadius(m) {
+      // Precision enemies are drawn as long triangular darts. If we only use the
+      // center orb radius here, the visible enemy can overlap the tip circle
+      // before the hit actually registers. Use the full drawn dart reach instead.
+      return Math.max(m.radius + 4, m.radius * 2);
     }
 
     // City shields
@@ -2894,8 +2894,6 @@ class GoldEnemy {
 
     function enterGameOver(reason) {
       if (gameState === "gameover") {
-        resetGame();
-        gameState = "playing";
         return;
       }
       gameOver = true;
@@ -3074,7 +3072,7 @@ class GoldEnemy {
         const tipR = precisionTipRadius();
         const dx = m.x - mouse.x;
         const dy = m.y - mouse.y;
-        const r = tipR + m.radius;
+        const r = tipR + precisionEnemyHitRadius(m);
         return dx*dx + dy*dy <= r * r;
       }
 
@@ -3413,12 +3411,13 @@ class GoldEnemy {
         const normalUpgradeNow = (UPGRADE_LEVELS.indexOf(level) !== -1);
 
         if (normalUpgradeNow || bonusUpgradePendingCount > 0) {
+          const bonusOnlyNow = (!normalUpgradeNow && bonusUpgradePendingCount > 0);
           // If we're here ONLY because of a gold bonus (not normal upgrade), consume one token now.
-          if (!normalUpgradeNow && bonusUpgradePendingCount > 0) {
+          if (bonusOnlyNow) {
             bonusUpgradePendingCount--;
           }
 
-          buildUpgradeChoicesAndLayout();
+          buildUpgradeChoicesAndLayout(bonusOnlyNow);
           gameState = "upgrade";
 
           // prevent accidental upgrade selection if player is still holding fire
@@ -3881,6 +3880,7 @@ class GoldEnemy {
       }
       return false;
     }
+
 function drawHUD() {
       if (gameState !== "playing" && gameState !== "paused" && gameState !== "gameover") return;
 
@@ -4227,17 +4227,12 @@ function drawHUD() {
 
     // -------- MENU / CREDITS / SETTINGS --------
 
-    // Main menu bottom buttons (Credits / Settings / Help)
-    // Evenly spaced + perfectly centered
-    const MENU_BTN_W = 172, MENU_BTN_H = 56, MENU_BTN_GAP = 18;
-    const menuRowTotalW = MENU_BTN_W * 3 + MENU_BTN_GAP * 2;
-    const menuRowX0 = (W - menuRowTotalW) / 2;
-    const menuCredits  = { x: menuRowX0,                           y: 458, w: MENU_BTN_W, h: MENU_BTN_H };
-    const menuSettings = { x: menuRowX0 + (MENU_BTN_W + MENU_BTN_GAP), y: 458, w: MENU_BTN_W, h: MENU_BTN_H };
-    const menuHelp     = { x: menuRowX0 + 2*(MENU_BTN_W + MENU_BTN_GAP), y: 458, w: MENU_BTN_W, h: MENU_BTN_H };
-
-    // Start button aligns side-to-side with the bottom row group (same left/right edges)
-    const menuStart = { x: menuRowX0, y: 368, w: menuRowTotalW, h: 62 };
+    const MENU_BTN_W = 340, MENU_BTN_H = 56, MENU_BTN_GAP = 16;
+    const menuBtnX = W / 2 - MENU_BTN_W / 2;
+    const menuStart    = { x: menuBtnX, y: 232, w: MENU_BTN_W, h: MENU_BTN_H };
+    const menuCredits  = { x: menuBtnX, y: menuStart.y + MENU_BTN_H + MENU_BTN_GAP, w: MENU_BTN_W, h: MENU_BTN_H };
+    const menuSettings = { x: menuBtnX, y: menuCredits.y + MENU_BTN_H + MENU_BTN_GAP, w: MENU_BTN_W, h: MENU_BTN_H };
+    const menuHelp     = { x: menuBtnX, y: menuSettings.y + MENU_BTN_H + MENU_BTN_GAP, w: MENU_BTN_W, h: MENU_BTN_H };
 
     const creditsPanel = { x: W/2 - 260, y: H/2 - 150, w: 520, h: 300 };
     const creditsBack  = { x: W/2 - 80, y: creditsPanel.y + creditsPanel.h - 60, w: 160, h: 40 };
@@ -4479,19 +4474,255 @@ function drawHUD() {
 
       return { beat, best: lb.length ? lb[0].score : 0, list: lb, mode };
     }
+    const menuScene = {
+      ready: false,
+      lastTs: 0,
+      spawnTimer: 0,
+      stars: [],
+      shootingStars: []
+    };
 
+    function initMenuScene(force = false) {
+      if (menuScene.ready && !force) return;
+      menuScene.spawnTimer = 0;
+      menuScene.shootingStars = [];
+      if (!menuScene.stars.length || force) {
+        menuScene.stars = [];
+        for (let i = 0; i < 120; i++) {
+          menuScene.stars.push({
+            x: Math.random() * W,
+            y: Math.random() * H,
+            r: Math.random() * 1.9 + 0.25,
+            a: 0.34 + Math.random() * 0.58,
+            tw: Math.random() * Math.PI * 2
+          });
+        }
+      }
+      menuScene.ready = true;
+    }
 
+    function spawnShootingStar() {
+      const startX = Math.random() * (W * 0.75);
+      const startY = Math.random() * (H * 0.45);
+      const speed = 420 + Math.random() * 180;
+      menuScene.shootingStars.push({
+        x: startX,
+        y: startY,
+        vx: speed,
+        vy: speed * 0.26,
+        len: 70 + Math.random() * 40,
+        life: 0.5 + Math.random() * 0.35,
+        age: 0
+      });
+    }
+
+    function updateMenuScene(ts) {
+      initMenuScene();
+      if (!menuScene.lastTs) menuScene.lastTs = ts;
+      const dt = Math.min(0.05, Math.max(0.001, (ts - menuScene.lastTs) / 1000));
+      menuScene.lastTs = ts;
+      menuScene.spawnTimer += dt;
+      if (menuScene.spawnTimer >= 1.25) {
+        menuScene.spawnTimer = 0;
+        if (menuScene.shootingStars.length < 4) spawnShootingStar();
+      }
+
+      for (const s of menuScene.stars) {
+        s.tw += dt * (0.8 + s.r * 0.2);
+      }
+
+      for (const star of menuScene.shootingStars) {
+        star.age += dt;
+        star.x += star.vx * dt;
+        star.y += star.vy * dt;
+      }
+      menuScene.shootingStars = menuScene.shootingStars.filter(star =>
+        star.age < star.life && star.x < W + star.len && star.y < H + star.len
+      );
+    }
+
+    function drawMenuButton(rect, label, emphasis = false) {
+      ctx.save();
+      ctx.fillStyle = emphasis ? "rgba(0,35,0,0.62)" : "rgba(0,18,0,0.58)";
+      ctx.strokeStyle = emphasis ? "rgba(0,255,0,0.95)" : "rgba(0,255,0,0.82)";
+      ctx.lineWidth = 2;
+      ctx.shadowColor = "rgba(0,255,0,0.28)";
+      ctx.shadowBlur = emphasis ? 18 : 12;
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "#0f0";
+      ctx.font = emphasis ? "bold 28px monospace" : "22px monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2 + 1);
+      ctx.restore();
+    }
+
+    function drawMenuBackdrop(ts) {
+      updateMenuScene(ts);
+      drawSpaceBackdrop({ shootingStars: true, ground: false });
+    }
+
+    function drawSpaceBackdrop({ shootingStars = false, ground = false } = {}) {
+      initMenuScene();
+
+      if (ground) {
+        const skyBg = ctx.createLinearGradient(0, 0, W, groundLineY - 8);
+        skyBg.addColorStop(0, "#2c3f8f");
+        skyBg.addColorStop(0.22, "#5a47a8");
+        skyBg.addColorStop(0.44, "#7c52b8");
+        skyBg.addColorStop(0.66, "#4a7ab9");
+        skyBg.addColorStop(0.82, "#56b9a5");
+        skyBg.addColorStop(1, "#245d42");
+        ctx.fillStyle = skyBg;
+      } else {
+        ctx.fillStyle = "#000";
+      }
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.save();
+      for (const s of menuScene.stars) {
+        ctx.globalAlpha = Math.min(1, s.a * (0.92 + Math.sin(s.tw) * 0.28));
+        ctx.fillStyle = "#f0fff0";
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      if (shootingStars) {
+        ctx.save();
+        ctx.lineCap = "round";
+        for (const star of menuScene.shootingStars) {
+          const a = 1 - (star.age / star.life);
+          ctx.strokeStyle = `rgba(180,255,180,${0.9 * a})`;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(star.x, star.y);
+          ctx.lineTo(star.x - star.len, star.y - star.len * 0.28);
+          ctx.stroke();
+
+          ctx.fillStyle = `rgba(230,255,230,${0.95 * a})`;
+          ctx.beginPath();
+          ctx.arc(star.x, star.y, 2.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      if (ground) {
+        const horizonY = groundLineY - 24;
+
+        const glow = ctx.createRadialGradient(W / 2, horizonY - 2, 10, W / 2, horizonY - 2, 320);
+        glow.addColorStop(0, "rgba(80,220,80,0.10)");
+        glow.addColorStop(0.45, "rgba(20,100,20,0.035)");
+        glow.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, horizonY - 180, W, 240);
+
+        const groundGrad = ctx.createLinearGradient(0, horizonY - 14, 0, H);
+        groundGrad.addColorStop(0, "rgba(4,18,4,0.28)");
+        groundGrad.addColorStop(0.28, "rgba(2,12,2,0.70)");
+        groundGrad.addColorStop(1, "rgba(0,3,0,0.98)");
+        ctx.fillStyle = groundGrad;
+        ctx.fillRect(0, horizonY - 14, W, H - horizonY + 14);
+
+        ctx.save();
+
+        // Far ridge line behind the cities.
+        ctx.fillStyle = "rgba(7,24,7,0.96)";
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        ctx.lineTo(0, horizonY + 20);
+        ctx.quadraticCurveTo(W * 0.14, horizonY + 10, W * 0.30, horizonY + 18);
+        ctx.quadraticCurveTo(W * 0.46, horizonY + 26, W * 0.62, horizonY + 14);
+        ctx.quadraticCurveTo(W * 0.80, horizonY + 8, W, horizonY + 18);
+        ctx.lineTo(W, H);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = "rgba(65,170,95,0.12)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, horizonY + 20);
+        ctx.quadraticCurveTo(W * 0.14, horizonY + 10, W * 0.30, horizonY + 18);
+        ctx.quadraticCurveTo(W * 0.46, horizonY + 26, W * 0.62, horizonY + 14);
+        ctx.quadraticCurveTo(W * 0.80, horizonY + 8, W, horizonY + 18);
+        ctx.stroke();
+
+        // Midground hills that frame the skyline.
+        ctx.fillStyle = "rgba(4,16,4,1)";
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        ctx.lineTo(0, groundLineY + 8);
+        ctx.quadraticCurveTo(W * 0.10, groundLineY - 2, W * 0.24, groundLineY + 7);
+        ctx.quadraticCurveTo(W * 0.40, groundLineY + 14, W * 0.54, groundLineY + 6);
+        ctx.quadraticCurveTo(W * 0.70, groundLineY - 1, W * 0.84, groundLineY + 8);
+        ctx.quadraticCurveTo(W * 0.93, groundLineY + 13, W, groundLineY + 9);
+        ctx.lineTo(W, H);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = "rgba(55,150,75,0.16)";
+        ctx.lineWidth = 1.1;
+        ctx.beginPath();
+        ctx.moveTo(0, groundLineY + 8);
+        ctx.quadraticCurveTo(W * 0.10, groundLineY - 2, W * 0.24, groundLineY + 7);
+        ctx.quadraticCurveTo(W * 0.40, groundLineY + 14, W * 0.54, groundLineY + 6);
+        ctx.quadraticCurveTo(W * 0.70, groundLineY - 1, W * 0.84, groundLineY + 8);
+        ctx.quadraticCurveTo(W * 0.93, groundLineY + 13, W, groundLineY + 9);
+        ctx.stroke();
+
+        // City platform so the buildings visibly sit on a ground plane.
+        const platformGrad = ctx.createLinearGradient(0, groundLineY - 6, 0, groundLineY + 18);
+        platformGrad.addColorStop(0, "rgba(18,72,18,0.72)");
+        platformGrad.addColorStop(0.35, "rgba(10,42,10,0.96)");
+        platformGrad.addColorStop(1, "rgba(2,12,2,1)");
+        ctx.fillStyle = platformGrad;
+        ctx.beginPath();
+        ctx.moveTo(0, groundLineY + 16);
+        ctx.lineTo(0, groundLineY - 4);
+        ctx.quadraticCurveTo(W * 0.16, groundLineY - 12, W * 0.34, groundLineY - 2);
+        ctx.quadraticCurveTo(W * 0.50, groundLineY + 6, W * 0.68, groundLineY - 3);
+        ctx.quadraticCurveTo(W * 0.86, groundLineY - 11, W, groundLineY + 2);
+        ctx.lineTo(W, groundLineY + 16);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.strokeStyle = "rgba(75,220,75,0.28)";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(0, groundLineY - 3);
+        ctx.quadraticCurveTo(W * 0.16, groundLineY - 11, W * 0.34, groundLineY - 2);
+        ctx.quadraticCurveTo(W * 0.50, groundLineY + 5, W * 0.68, groundLineY - 3);
+        ctx.quadraticCurveTo(W * 0.86, groundLineY - 10, W, groundLineY + 1);
+        ctx.stroke();
+
+        // Dark foreground lip below the UI/bar area.
+        ctx.fillStyle = "rgba(0,6,0,0.98)";
+        ctx.fillRect(0, groundLineY + 14, W, H - (groundLineY + 14));
+        ctx.restore();
+      }
+    }
 
     function drawMenu() {
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, W, H);
-      if (menuBg.complete && menuBg.naturalWidth > 0) ctx.drawImage(menuBg, 0, 0, W, H);
-      else {
-        ctx.fillStyle = "#0f0";
-        ctx.font = "36px monospace";
-        ctx.textAlign = "center";
-        ctx.fillText("LASER SKYLINE DEFENSE", W/2, H/2);
-      }
+      drawMenuBackdrop(performance.now());
+
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "#0f0";
+      ctx.shadowColor = "rgba(0,255,0,0.25)";
+      ctx.shadowBlur = 24;
+      ctx.font = "bold 46px monospace";
+      ctx.fillText("LASER SKYLINE DEFENSE", W / 2, 110);
+      ctx.shadowBlur = 0;
+
+      drawMenuButton(menuStart, "START", true);
+      drawMenuButton(menuCredits, "CREDITS");
+      drawMenuButton(menuSettings, "SETTINGS");
+      drawMenuButton(menuHelp, "HELP");
+      ctx.restore();
+
       if (showCredits) drawCredits();
     }
 
@@ -4604,6 +4835,7 @@ function drawHUD() {
 
     function drawHelpPanel() {
       ctx.save();
+      drawSpaceBackdrop({ shootingStars: false, ground: false });
       ctx.fillStyle = "rgba(0,0,0,0.85)";
       ctx.fillRect(0, 0, W, H);
 
@@ -4785,20 +5017,9 @@ function drawHUD() {
     }
 
     function drawLeaderboardPanel() {
-      // Settings-style background
-      if (gameBgImg && gameBgImg.complete && gameBgImg.naturalWidth) {
-        const iw = gameBgImg.naturalWidth, ih = gameBgImg.naturalHeight;
-        const s = Math.max(W / iw, H / ih);
-        const dw = iw * s, dh = ih * s;
-        const dx = (W - dw) / 2, dy = (H - dh) / 2;
-        ctx.drawImage(gameBgImg, dx, dy, dw, dh);
-        ctx.fillStyle = "rgba(0,0,0,0.35)";
-        ctx.fillRect(0, 0, W, H);
-      } else {
-        ctx.fillStyle = "#000";
-        ctx.fillRect(0, 0, W, H);
-        drawGrid();
-      }
+      drawSpaceBackdrop({ shootingStars: false, ground: false });
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(0, 0, W, H);
 
       // Panel
       const panel = { x: W/2 - 320, y: 150, w: 640, h: 320 };
@@ -4866,20 +5087,9 @@ function drawHUD() {
       }
 
 
-      // Background image (no stretching; cover-crop like the main menu)
-      if (gameBgImg && gameBgImg.complete && gameBgImg.naturalWidth) {
-        const iw = gameBgImg.naturalWidth, ih = gameBgImg.naturalHeight;
-        const s = Math.max(W / iw, H / ih);
-        const dw = iw * s, dh = ih * s;
-        const dx = (W - dw) / 2, dy = (H - dh) / 2;
-        ctx.drawImage(gameBgImg, dx, dy, dw, dh);
-        ctx.fillStyle = "rgba(0,0,0,0.35)";
-        ctx.fillRect(0, 0, W, H);
-      } else {
-        ctx.fillStyle = "#000";
-        ctx.fillRect(0, 0, W, H);
-        drawGrid();
-      }
+      drawSpaceBackdrop({ shootingStars: false, ground: false });
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(0, 0, W, H);
 
       ctx.fillStyle = "#0f0";
       ctx.font = "18px monospace";
@@ -4929,20 +5139,9 @@ function drawHUD() {
 
 
     function drawLeaderboardScreen() {
-      // Same background treatment as settings menu
-      if (gameBgImg && gameBgImg.complete && gameBgImg.naturalWidth) {
-        const iw = gameBgImg.naturalWidth, ih = gameBgImg.naturalHeight;
-        const s = Math.max(W / iw, H / ih);
-        const dw = iw * s, dh = ih * s;
-        const dx = (W - dw) / 2, dy = (H - dh) / 2;
-        ctx.drawImage(gameBgImg, dx, dy, dw, dh);
-        ctx.fillStyle = "rgba(0,0,0,0.35)";
-        ctx.fillRect(0, 0, W, H);
-      } else {
-        ctx.fillStyle = "#000";
-        ctx.fillRect(0, 0, W, H);
-        drawGrid();
-      }
+      drawSpaceBackdrop({ shootingStars: false, ground: false });
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(0, 0, W, H);
 
       const panel = { x: W/2 - 280, y: H/2 - 190, w: 560, h: 380 };
 
@@ -5107,25 +5306,26 @@ function drawHUD() {
       return list;
     }
 
-function getAvailableUpgradesNormal() {
+function getAvailableUpgradesNormal(relaxedEarly = false) {
       const list = [];
       const disabledCount = cities.filter(c => !c.alive).length;
+      const basicTierLevel = (relaxedEarly && level < 3) ? 3 : level;
 
       // Battery ordered
-      if (batteryLevel === 0 && level >= 3) list.push("battery1");
+      if (batteryLevel === 0 && basicTierLevel >= 3) list.push("battery1");
       if (batteryLevel === 1 && level >= 9) list.push("battery2");
       if (batteryLevel === 2 && level >= 9) list.push("battery3");
 
       // Laser power ordered
-      if (laserPowerLevel === 0 && level >= 3) list.push("laserPower1");
+      if (laserPowerLevel === 0 && basicTierLevel >= 3) list.push("laserPower1");
       if (laserPowerLevel === 1 && level >= 12) list.push("laserPower2");
 
       // Precision size ordered
-      if (precisionSizeLevel === 0 && level >= 3) list.push("precisionSize1");
+      if (precisionSizeLevel === 0 && basicTierLevel >= 3) list.push("precisionSize1");
       if (precisionSizeLevel === 1 && level >= 12) list.push("precisionSize2");
 
       // Power Plant ordered (Level 3 / 9)
-      if (powerPlantLevel === 0 && level >= 3) list.push("powerPlant1");
+      if (powerPlantLevel === 0 && basicTierLevel >= 3) list.push("powerPlant1");
       if (powerPlantLevel === 1 && level >= 9) list.push("powerPlant2");
 
       // City shields ordered
@@ -5133,14 +5333,14 @@ function getAvailableUpgradesNormal() {
       if (cityShieldLevel === 1 && level === 15) list.push("cityShields2");
 
       // Emergency reserve ordered
-      if (emergencyReserveLevel === 0 && level >= 3) list.push("emergencyReserve1");
+      if (emergencyReserveLevel === 0 && basicTierLevel >= 3) list.push("emergencyReserve1");
       if (emergencyReserveLevel === 1 && level >= 12) list.push("emergencyReserve2");
 
-      if (level >= 3 && disabledCount > 0) list.push("repairCity");
+      if (basicTierLevel >= 3 && disabledCount > 0) list.push("repairCity");
       if (!targetingSystemUnlocked && level >= 12) list.push("targetingSystem");
 
       // Processor ordered
-      if (processorLevel === 0 && level >= 3) list.push("processor1");
+      if (processorLevel === 0 && basicTierLevel >= 3) list.push("processor1");
       if (processorLevel === 1 && level >= 12) list.push("processor2");
 
       if (level === 15 && !empBlastUnlocked) list.push("empBlast");
@@ -5239,13 +5439,15 @@ function getAvailableUpgradesNormal() {
       ];
     }
 
-    function buildUpgradeChoicesAndLayout() {
+    function buildUpgradeChoicesAndLayout(isBonusScreen = false) {
+      currentUpgradeScreenIsBonus = isBonusScreen;
       let available;
       if (secretOnlyNextUpgrade) {
         available = getAvailableSecretUpgrades();
         secretOnlyNextUpgrade = false;
       } else {
-        available = advancedOnlyNextUpgrade ? getAvailableAdvancedUpgrades() : getAvailableUpgradesNormal();
+        const relaxedEarlyBonus = (!advancedOnlyNextUpgrade && isBonusScreen && level < 3);
+        available = advancedOnlyNextUpgrade ? getAvailableAdvancedUpgrades() : getAvailableUpgradesNormal(relaxedEarlyBonus);
         if (advancedOnlyNextUpgrade) advancedOnlyNextUpgrade = false;
       }
       if (!available.length) available = ["bonusScore", "bonusScore", "bonusScore"];
@@ -5355,8 +5557,7 @@ case "bonusScore": score += 1000; break;
 
     function drawUpgradeScreen() {
       if (upgradeBg.complete && upgradeBg.naturalWidth > 0) ctx.drawImage(upgradeBg, 0, 0, W, H);
-      else { ctx.fillStyle = "#000"; ctx.fillRect(0,0,W,H); }
-
+      else drawSpaceBackdrop({ shootingStars: false, ground: false });
       ctx.fillStyle = "rgba(0,0,0,0.55)";
       ctx.fillRect(0, 0, W, H);
 
@@ -5445,7 +5646,7 @@ case "bonusScore": score += 1000; break;
           // If gold queued extra upgrades, show another one immediately
           if (bonusUpgradePendingCount > 0) {
             bonusUpgradePendingCount--;
-            buildUpgradeChoicesAndLayout();
+            buildUpgradeChoicesAndLayout(true);
             gameState = "upgrade";
             upgradeIgnoreUntilRelease = pointerIsDown; // must release/click again
             return;
@@ -5493,10 +5694,8 @@ case "bonusScore": score += 1000; break;
       if (gameState === "settings") { drawSettingsScreen(); return; }
       if (gameState === "upgrade") { drawUpgradeScreen(); return; }
 
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, W, H);
       if (playBg.complete && playBg.naturalWidth > 0) ctx.drawImage(playBg, 0, 0, W, H);
-      else drawGrid();
+      else drawSpaceBackdrop({ shootingStars: false, ground: true });
 
       if (bossActive && boss) boss.draw(ctx);
       else if (bossDefeatActive && bossDefeatBossRef) bossDefeatBossRef.draw(ctx);
@@ -5685,7 +5884,7 @@ function canvasPos(evt) {
 }
 
     canvas.addEventListener("mousemove", (e) => {
-      if (gameState === "playing" || gameState === "paused") {
+      if (gameState === "playing" || gameState === "paused" || gameState === "settings") {
         const p = canvasPos(e);
         mouse.x = p.x; mouse.y = p.y;
         if ((gameState === "paused" || gameState === "settings") && activeAudioSlider) {
